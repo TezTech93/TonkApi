@@ -1,10 +1,10 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Optional
 import uuid
 import json
 from datetime import datetime, timedelta
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import asyncio
 from enum import Enum
 import random
@@ -45,7 +45,7 @@ class User(BaseModel):
     username: str
     email: str
     hashed_password: str
-    created_at: datetime = datetime.now()
+    created_at: datetime = Field(default_factory=datetime.now)
     games_played: int = 0
     games_won: int = 0
     online: bool = False
@@ -64,9 +64,11 @@ class TokenData(BaseModel):
 class CreateGameRequest(BaseModel):
     players: List[Dict]
     game_name: Optional[str] = None
+    userId: Optional[str] = None
 
 class JoinGameRequest(BaseModel):
     playerName: str
+    userId: Optional[str] = None
 
 class MoveRequest(BaseModel):
     playerId: str
@@ -97,9 +99,6 @@ class Player(BaseModel):
     turns: int = 0
     has_drawn_from_under: bool = False
     is_online: bool = True
-    
-    def dict(self):
-        return super().dict()
 
 class Game(BaseModel):
     id: str
@@ -108,22 +107,19 @@ class Game(BaseModel):
     players: List[Player]
     deck: List[Dict]
     discard_pile: List[Dict]
-    under_card: Optional[Dict]
+    under_card: Optional[Dict] = None
     current_player_index: int = 0
     turn_phase: str = "draw"
     table_spreads: List[Dict] = []
     turn_count: int = 1
     game_status: str = "playing"
-    created_at: datetime = datetime.now()
+    created_at: datetime = Field(default_factory=datetime.now)
     last_move: Optional[Dict] = None
     settings: Dict = {"allow_under_card_any_turn": True}
     winner: Optional[str] = None
     win_reason: Optional[str] = None
     creator_id: Optional[str] = None
     max_players: int = 4
-    
-    def dict(self):
-        return super().dict()
 
 # Data storage
 users: Dict[str, User] = {}
@@ -170,7 +166,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def get_current_user(token: str):
+async def get_current_user(token: str = Depends(Query(..., alias="token"))):
     credentials_exception = HTTPException(
         status_code=401,
         detail="Could not validate credentials",
@@ -280,9 +276,29 @@ async def get_online_users():
             })
     return {"online_users": online_users}
 
-# --- Game Endpoints (Updated with Authentication) ---
+@app.get("/api/auth/validate-token")
+async def validate_token(token: str = Query(...)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            return {"valid": False}
+        
+        user = get_user_by_username(username)
+        if not user:
+            return {"valid": False}
+        
+        return {
+            "valid": True,
+            "user_id": user.id,
+            "username": user.username
+        }
+    except JWTError:
+        return {"valid": False}
+
+# --- Game Endpoints ---
 @app.post("/api/game/create")
-async def create_game(request: CreateGameRequest):
+async def create_game(request: CreateGameRequest, current_user: User = Depends(get_current_user)):
     game_id = str(uuid.uuid4())
     room_code = game_id[:6].upper()
     
@@ -290,14 +306,13 @@ async def create_game(request: CreateGameRequest):
     game_players = []
     for i, player_data in enumerate(request.players):
         player_name = player_data["name"]
-        # If this is the first player and we have a user_id, use the user's username
-        if i == 0 and user_id and user_id in users:
-            user = users[user_id]
-            player_name = user.username
+        # If this is the first player, use the authenticated user's info
+        if i == 0 and current_user:
+            player_name = current_user.username
         
         player = Player(
             id=str(uuid.uuid4()),
-            user_id=user_id if i == 0 and user_id else None,
+            user_id=current_user.id if i == 0 and current_user else None,
             name=player_name,
             is_computer=player_data.get("is_computer", False)
         )
@@ -333,26 +348,26 @@ async def create_game(request: CreateGameRequest):
         discard_pile=[],
         under_card=None,
         game_status="lobby",
-        creator_id=user_id
+        creator_id=current_user.id if current_user else None
     )
     
     games[game_id] = game
     connections[game_id] = []
     
     # Track active game for user
-    if user_id:
-        active_games_by_user[user_id] = game_id
+    if current_user:
+        active_games_by_user[current_user.id] = game_id
     
     return {
         "gameId": game_id,
         "roomCode": room_code,
         "playerId": game_players[0].id,
-        "players": [p.dict() for p in game_players],
+        "players": [p.model_dump() for p in game_players],
         "gameName": game.game_name
     }
 
 @app.post("/api/game/{room_code}/join")
-async def join_game(room_code: str, request: JoinGameRequest):
+async def join_game(room_code: str, request: JoinGameRequest, current_user: User = Depends(get_current_user)):
     # Find game by room code
     game = next((g for g in games.values() if g.room_code == room_code), None)
     if not game:
@@ -366,14 +381,17 @@ async def join_game(room_code: str, request: JoinGameRequest):
     
     # Determine player name
     player_name = request.playerName
-    if user_id and user_id in users:
-        user = users[user_id]
-        player_name = user.username
+    if current_user:
+        player_name = current_user.username
+    
+    # Check if user is already in the game
+    if current_user and any(p.user_id == current_user.id for p in game.players):
+        raise HTTPException(status_code=400, detail="You are already in this game")
     
     # Create new player
     player = Player(
         id=str(uuid.uuid4()),
-        user_id=user_id,
+        user_id=current_user.id if current_user else None,
         name=player_name,
         is_computer=False
     )
@@ -381,8 +399,8 @@ async def join_game(room_code: str, request: JoinGameRequest):
     game.players.append(player)
     
     # Track active game for user
-    if user_id:
-        active_games_by_user[user_id] = game.id
+    if current_user:
+        active_games_by_user[current_user.id] = game.id
     
     # Broadcast update
     await broadcast_game_state(game.id)
@@ -390,7 +408,7 @@ async def join_game(room_code: str, request: JoinGameRequest):
     return {
         "gameId": game.id,
         "playerId": player.id,
-        "gameState": game.dict()
+        "gameState": game.model_dump()
     }
 
 @app.get("/api/game/available")
@@ -402,7 +420,7 @@ async def get_available_games():
                 "gameId": game.id,
                 "roomCode": game.room_code,
                 "gameName": game.game_name,
-                "players": [p.dict() for p in game.players],
+                "players": [p.model_dump() for p in game.players],
                 "currentPlayers": len(game.players),
                 "maxPlayers": game.max_players,
                 "creator": game.creator_id,
@@ -428,14 +446,14 @@ async def get_user_active_game(user_id: str):
     return {"hasActiveGame": False}
 
 @app.post("/api/game/{game_id}/leave")
-async def leave_game(game_id: str, user_id: str):
+async def leave_game(game_id: str, current_user: User = Depends(get_current_user)):
     if game_id not in games:
         raise HTTPException(status_code=404, detail="Game not found")
     
     game = games[game_id]
     
     # Find player by user_id
-    player_index = next((i for i, p in enumerate(game.players) if p.user_id == user_id), -1)
+    player_index = next((i for i, p in enumerate(game.players) if p.user_id == current_user.id), -1)
     
     if player_index == -1:
         raise HTTPException(status_code=404, detail="Player not found in this game")
@@ -459,8 +477,8 @@ async def leave_game(game_id: str, user_id: str):
         await broadcast_game_state(game_id)
     
     # Remove from active games tracking
-    if user_id in active_games_by_user:
-        del active_games_by_user[user_id]
+    if current_user.id in active_games_by_user:
+        del active_games_by_user[current_user.id]
     
     return {
         "success": True,
@@ -468,11 +486,15 @@ async def leave_game(game_id: str, user_id: str):
     }
 
 @app.post("/api/game/{game_id}/start")
-async def start_game(game_id: str):
+async def start_game(game_id: str, current_user: User = Depends(get_current_user)):
     if game_id not in games:
         raise HTTPException(status_code=404, detail="Game not found")
     
     game = games[game_id]
+    
+    # Check if user is the creator
+    if game.creator_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the game creator can start the game")
     
     if len(game.players) < 2:
         raise HTTPException(status_code=400, detail="Need at least 2 players")
@@ -508,11 +530,11 @@ async def start_game(game_id: str):
     
     return {
         "success": True,
-        "gameState": game.dict(),
+        "gameState": game.model_dump(),
     }
 
 @app.post("/api/game/{game_id}/move")
-async def make_move(game_id: str, request: MoveRequest):
+async def make_move(game_id: str, request: MoveRequest, current_user: User = Depends(get_current_user)):
     if game_id not in games:
         raise HTTPException(status_code=404, detail="Game not found")
     
@@ -522,10 +544,15 @@ async def make_move(game_id: str, request: MoveRequest):
     if player_index == -1:
         raise HTTPException(status_code=404, detail="Player not found")
     
+    # Check if it's the player's turn
     if game.current_player_index != player_index:
         raise HTTPException(status_code=400, detail="Not your turn")
     
     player = game.players[player_index]
+    
+    # Verify the user owns this player
+    if player.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You don't own this player")
     
     # Process move
     move_result = process_move(game, player_index, request.moveType, request.moveData)
@@ -545,23 +572,25 @@ async def make_move(game_id: str, request: MoveRequest):
         game.winner = move_result.get("winner")
         game.win_reason = move_result.get("win_reason")
         
-        # Update user stats
-        if player.user_id and player.user_id in users:
-            user = users[player.user_id]
-            user.games_played += 1
-            user.games_won += 1
+        # Update user stats for all players
+        for p in game.players:
+            if p.user_id and p.user_id in users:
+                user = users[p.user_id]
+                user.games_played += 1
+                if p.id == game.winner:
+                    user.games_won += 1
     
     # Broadcast update
     await broadcast_game_state(game_id)
     
     return {
         "success": True,
-        "gameState": game.dict(),
+        "gameState": game.model_dump(),
         "lastMove": game.last_move
     }
 
 @app.get("/api/game/{game_id}/state")
-async def get_game_state(game_id: str):
+async def get_game_state(game_id: str, current_user: User = Depends(get_current_user)):
     if game_id not in games:
         raise HTTPException(status_code=404, detail="Game not found")
     
@@ -570,7 +599,7 @@ async def get_game_state(game_id: str):
     # Enhance player info with user data
     enhanced_players = []
     for player in game.players:
-        player_data = player.dict()
+        player_data = player.model_dump()
         if player.user_id and player.user_id in users:
             user = users[player.user_id]
             player_data["user"] = {
@@ -581,7 +610,7 @@ async def get_game_state(game_id: str):
             }
         enhanced_players.append(player_data)
     
-    game_state = game.dict()
+    game_state = game.model_dump()
     game_state["players"] = enhanced_players
     
     return {
@@ -599,7 +628,7 @@ async def get_lobby_state(game_id: str):
     # Enhance player info with user data
     enhanced_players = []
     for player in game.players:
-        player_data = player.dict()
+        player_data = player.model_dump()
         if player.user_id and player.user_id in users:
             user = users[player.user_id]
             player_data["user"] = {
@@ -675,22 +704,25 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str, token: Optional
                 
             elif message["type"] == "move":
                 # Forward move to API
-                await make_move(
-                    game_id, 
-                    message["playerId"], 
-                    message["moveType"], 
-                    message["moveData"]
-                )
+                # Note: In a real implementation, you might want to handle moves directly here
+                # For now, we'll just broadcast that a move was made
+                await broadcast_message(game_id, {
+                    "type": "move_notification",
+                    "player": username,
+                    "moveType": message.get("moveType"),
+                    "timestamp": datetime.now().isoformat()
+                })
                 
             elif message["type"] == "ping":
                 # Keep connection alive and update user status
                 if user_id and user_id in users:
                     users[user_id].last_seen = datetime.now()
                 await websocket.send_text(json.dumps({"type": "pong"}))
-    
+                
     except WebSocketDisconnect:
         if game_id in connections:
-            connections[game_id].remove(websocket)
+            if websocket in connections[game_id]:
+                connections[game_id].remove(websocket)
         
         # Remove player connection
         player_id = next((pid for pid, ws in player_connections.items() if ws == websocket), None)
@@ -713,13 +745,13 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str, token: Optional
                 users[user_id].last_seen = datetime.now()
 
 async def broadcast_game_state(game_id: str):
-    if game_id in connections:
+    if game_id in connections and game_id in games:
         game = games[game_id]
         
         # Enhance player info with user data
         enhanced_players = []
         for player in game.players:
-            player_data = player.dict()
+            player_data = player.model_dump()
             if player.user_id and player.user_id in users:
                 user = users[player.user_id]
                 player_data["user"] = {
@@ -730,7 +762,7 @@ async def broadcast_game_state(game_id: str):
                 }
             enhanced_players.append(player_data)
         
-        game_state = game.dict()
+        game_state = game.model_dump()
         game_state["players"] = enhanced_players
         
         message = json.dumps({
@@ -797,7 +829,7 @@ def process_move(game: Game, player_index: int, move_type: str, move_data: Dict)
                 game.discard_pile.append(card)
                 player.last_move = f"Discarded {card['rank']} of {card['suit']}"
                 
-                # Check for Tonk Out
+                # Check for Tonk Out (win condition)
                 if len(player.hand) == 0:
                     return {
                         "game_over": True,
@@ -812,7 +844,125 @@ def process_move(game: Game, player_index: int, move_type: str, move_data: Dict)
                     next_player = game.players[game.current_player_index]
                     next_player.turns += 1
     
+    elif move_type == MoveType.TONK:
+        # Calculate hand value
+        hand_value = sum(card["value"] for card in player.hand)
+        if hand_value <= 5:
+            return {
+                "game_over": True,
+                "winner": player.id,
+                "win_reason": f"Tonk! (Hand value: {hand_value})"
+            }
+        else:
+            # Penalty for false Tonk call
+            player.score += 10  # Add penalty points
+            game.current_player_index = (game.current_player_index + 1) % len(game.players)
+            game.turn_phase = "draw"
+    
+    elif move_type == MoveType.DROP:
+        player.has_dropped = True
+        player.last_move = "Dropped out"
+        # Calculate score for dropped player
+        player.score = sum(card["value"] for card in player.hand)
+        
+        # Check if all but one player have dropped
+        active_players = [p for p in game.players if not p.has_dropped]
+        if len(active_players) == 1:
+            return {
+                "game_over": True,
+                "winner": active_players[0].id,
+                "win_reason": "All other players dropped"
+            }
+        else:
+            # Move to next active player
+            next_index = (player_index + 1) % len(game.players)
+            while game.players[next_index].has_dropped:
+                next_index = (next_index + 1) % len(game.players)
+            game.current_player_index = next_index
+            game.turn_phase = "draw"
+    
+    elif move_type == MoveType.CREATE_SPREAD:
+        card_ids = move_data.get("cards", [])
+        if len(card_ids) >= 3:  # Minimum 3 cards for a spread
+            spread_cards = []
+            for card_id in card_ids:
+                card_index = next((i for i, c in enumerate(player.hand) if c["id"] == card_id), -1)
+                if card_index != -1:
+                    spread_cards.append(player.hand.pop(card_index))
+            
+            if len(spread_cards) >= 3:
+                spread = {
+                    "id": str(uuid.uuid4()),
+                    "cards": spread_cards,
+                    "owner": player.id,
+                    "type": "player"  # Can be "player" or "table"
+                }
+                player.spreads.append(spread)
+                player.last_move = f"Created spread with {len(spread_cards)} cards"
+    
+    elif move_type == MoveType.ADD_TO_SPREAD:
+        spread_id = move_data.get("spreadId")
+        card_id = move_data.get("cardId")
+        
+        if spread_id and card_id:
+            # Find the card in player's hand
+            card_index = next((i for i, c in enumerate(player.hand) if c["id"] == card_id), -1)
+            if card_index != -1:
+                card = player.hand.pop(card_index)
+                
+                # Try to find spread in player's spreads
+                spread = None
+                for s in player.spreads:
+                    if s["id"] == spread_id:
+                        spread = s
+                        break
+                
+                # If not found in player's spreads, check table spreads
+                if not spread:
+                    for s in game.table_spreads:
+                        if s["id"] == spread_id:
+                            spread = s
+                            break
+                
+                if spread:
+                    spread["cards"].append(card)
+                    player.last_move = f"Added card to spread"
+    
+    elif move_type == MoveType.HIT:
+        spread_id = move_data.get("spreadId")
+        card_id = move_data.get("cardId")
+        
+        if spread_id and card_id:
+            # Find the card in player's hand
+            card_index = next((i for i, c in enumerate(player.hand) if c["id"] == card_id), -1)
+            if card_index != -1:
+                card = player.hand.pop(card_index)
+                
+                # Find the spread on table
+                spread_index = next((i for i, s in enumerate(game.table_spreads) if s["id"] == spread_id), -1)
+                if spread_index != -1:
+                    spread = game.table_spreads.pop(spread_index)
+                    # Add all cards from spread to player's hand
+                    player.hand.extend(spread["cards"])
+                    # Add the hitting card to hand as well
+                    player.hand.append(card)
+                    player.last_move = f"Hit a spread and took {len(spread['cards'])} cards"
+    
     return {"success": True}
+
+@app.get("/")
+async def root():
+    return {"message": "Tonk Game API is running", "status": "ok"}
+
+@app.get("/api/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "games_count": len(games),
+        "users_count": len(users),
+        "connections_count": sum(len(conns) for conns in connections.values())
+    }
 
 if __name__ == "__main__":
     import uvicorn
