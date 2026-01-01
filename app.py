@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Optional
 import uuid
@@ -21,7 +21,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 app = FastAPI(title="Tonk Game API")
 
-# CORS middleware
+# CORS middleware - Enhanced for all origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -64,9 +64,11 @@ class TokenData(BaseModel):
 class CreateGameRequest(BaseModel):
     players: List[Dict]
     game_name: Optional[str] = None
+    userId: Optional[str] = None  # Changed to match frontend
 
 class JoinGameRequest(BaseModel):
     playerName: str
+    userId: Optional[str] = None  # Changed to match frontend
 
 class MoveRequest(BaseModel):
     playerId: str
@@ -159,50 +161,37 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-# Fixed: Query should be used directly, not inside Depends
-async def get_current_user(token: str = Query(None, alias="token")):
-    if not token:
-        raise HTTPException(
-            status_code=401,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+# NEW: Simple authorization header dependency
+async def get_current_user(authorization: Optional[str] = Header(None)):
+    """Get current user from Authorization header"""
+    if not authorization:
+        # Allow guest users for game creation
+        return None
     
-    credentials_exception = HTTPException(
-        status_code=401,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+    
+    token = authorization.split(" ")[1]
+    
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-        token_data = TokenData(username=username)
+        if not username:
+            return None
+        
+        user = get_user_by_username(username)
+        if not user:
+            return None
+            
+        return user
     except JWTError:
-        raise credentials_exception
-    
-    user = get_user_by_username(token_data.username)
-    if user is None:
-        raise credentials_exception
-    return user
-
-# Alternative: If you want to use Authorization header instead of query parameter
-async def get_current_user_from_header(authorization: str = Query(None, alias="Authorization")):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    token = authorization.split(" ")[1]
-    return await get_current_user(token)
+        # Invalid token - treat as guest
+        return None
 
 # --- Authentication Endpoints ---
 @app.post("/api/auth/register", response_model=Token)
@@ -267,19 +256,18 @@ async def login(user_data: UserLogin):
         username=user.username
     )
 
-@app.get("/api/auth/profile/{user_id}")
-async def get_user_profile(user_id: str):
-    if user_id not in users:
-        raise HTTPException(status_code=404, detail="User not found")
+@app.get("/api/auth/profile")
+async def get_user_profile(current_user: Optional[User] = Depends(get_current_user)):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
     
-    user = users[user_id]
     return {
-        "id": user.id,
-        "username": user.username,
-        "games_played": user.games_played,
-        "games_won": user.games_won,
-        "online": user.online,
-        "last_seen": user.last_seen.isoformat() if user.last_seen else None
+        "id": current_user.id,
+        "username": current_user.username,
+        "games_played": current_user.games_played,
+        "games_won": current_user.games_won,
+        "online": current_user.online,
+        "last_seen": current_user.last_seen.isoformat() if current_user.last_seen else None
     }
 
 @app.get("/api/auth/online-users")
@@ -295,7 +283,12 @@ async def get_online_users():
     return {"online_users": online_users}
 
 @app.get("/api/auth/validate-token")
-async def validate_token(token: str = Query(...)):
+async def validate_token(authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        return {"valid": False}
+    
+    token = authorization.split(" ")[1]
+    
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
@@ -316,10 +309,8 @@ async def validate_token(token: str = Query(...)):
 
 # --- Game Endpoints ---
 @app.post("/api/game/create")
-async def create_game(
-    request: CreateGameRequest,
-    current_user: User = Depends(get_current_user)  # Fixed: using dependency correctly
-):
+async def create_game(request: CreateGameRequest, current_user: Optional[User] = Depends(get_current_user)):
+    """Create a new game - supports both authenticated and guest users"""
     game_id = str(uuid.uuid4())
     room_code = game_id[:6].upper()
     
@@ -327,13 +318,19 @@ async def create_game(
     game_players = []
     for i, player_data in enumerate(request.players):
         player_name = player_data["name"]
-        # If this is the first player, use the authenticated user's info
-        if i == 0 and current_user:
-            player_name = current_user.username
+        user_id = None
+        
+        # First player gets the authenticated user or guest ID
+        if i == 0:
+            if current_user:
+                player_name = current_user.username
+                user_id = current_user.id
+            elif request.userId:
+                user_id = request.userId  # Guest user ID from frontend
         
         player = Player(
             id=str(uuid.uuid4()),
-            user_id=current_user.id if i == 0 and current_user else None,
+            user_id=user_id,
             name=player_name,
             is_computer=player_data.get("is_computer", False)
         )
@@ -360,6 +357,7 @@ async def create_game(
     random.shuffle(deck)
     
     # Create game in lobby state
+    creator_id = current_user.id if current_user else request.userId
     game = Game(
         id=game_id,
         room_code=room_code,
@@ -369,17 +367,18 @@ async def create_game(
         discard_pile=[],
         under_card=None,
         game_status="lobby",
-        creator_id=current_user.id if current_user else None
+        creator_id=creator_id
     )
     
     games[game_id] = game
     connections[game_id] = []
     
     # Track active game for user
-    if current_user:
-        active_games_by_user[current_user.id] = game_id
+    if creator_id:
+        active_games_by_user[creator_id] = game_id
     
     return {
+        "success": True,
         "gameId": game_id,
         "roomCode": room_code,
         "playerId": game_players[0].id,
@@ -388,11 +387,8 @@ async def create_game(
     }
 
 @app.post("/api/game/{room_code}/join")
-async def join_game(
-    room_code: str,
-    request: JoinGameRequest,
-    current_user: User = Depends(get_current_user)  # Fixed: using dependency correctly
-):
+async def join_game(room_code: str, request: JoinGameRequest, current_user: Optional[User] = Depends(get_current_user)):
+    """Join an existing game - supports both authenticated and guest users"""
     # Find game by room code
     game = next((g for g in games.values() if g.room_code == room_code), None)
     if not game:
@@ -404,33 +400,32 @@ async def join_game(
     if len(game.players) >= game.max_players:
         raise HTTPException(status_code=400, detail="Game is full")
     
-    # Determine player name
-    player_name = request.playerName
-    if current_user:
-        player_name = current_user.username
+    # Determine user ID
+    user_id = current_user.id if current_user else request.userId
     
     # Check if user is already in the game
-    if current_user and any(p.user_id == current_user.id for p in game.players):
+    if user_id and any(p.user_id == user_id for p in game.players):
         raise HTTPException(status_code=400, detail="You are already in this game")
     
     # Create new player
     player = Player(
         id=str(uuid.uuid4()),
-        user_id=current_user.id if current_user else None,
-        name=player_name,
+        user_id=user_id,
+        name=request.playerName,
         is_computer=False
     )
     
     game.players.append(player)
     
     # Track active game for user
-    if current_user:
-        active_games_by_user[current_user.id] = game.id
+    if user_id:
+        active_games_by_user[user_id] = game.id
     
     # Broadcast update
     await broadcast_game_state(game.id)
     
     return {
+        "success": True,
         "gameId": game.id,
         "playerId": player.id,
         "gameState": game.model_dump()
@@ -438,6 +433,7 @@ async def join_game(
 
 @app.get("/api/game/available")
 async def get_available_games():
+    """Get list of available games - no auth required"""
     available_games = []
     for game in games.values():
         if game.game_status == "lobby" and len(game.players) < game.max_players:
@@ -470,61 +466,15 @@ async def get_user_active_game(user_id: str):
     
     return {"hasActiveGame": False}
 
-@app.post("/api/game/{game_id}/leave")
-async def leave_game(
-    game_id: str,
-    current_user: User = Depends(get_current_user)  # Fixed: using dependency correctly
-):
-    if game_id not in games:
-        raise HTTPException(status_code=404, detail="Game not found")
-    
-    game = games[game_id]
-    
-    # Find player by user_id
-    player_index = next((i for i, p in enumerate(game.players) if p.user_id == current_user.id), -1)
-    
-    if player_index == -1:
-        raise HTTPException(status_code=404, detail="Player not found in this game")
-    
-    player = game.players[player_index]
-    
-    # Remove player from game
-    removed_player = game.players.pop(player_index)
-    
-    # If no players left, remove the game
-    if len(game.players) == 0:
-        del games[game_id]
-        if game_id in connections:
-            del connections[game_id]
-    else:
-        # If the current player left, move to next player
-        if game.current_player_index >= player_index:
-            game.current_player_index = max(0, game.current_player_index - 1)
-        
-        # Broadcast update
-        await broadcast_game_state(game_id)
-    
-    # Remove from active games tracking
-    if current_user.id in active_games_by_user:
-        del active_games_by_user[current_user.id]
-    
-    return {
-        "success": True,
-        "message": f"Player {removed_player.name} left the game"
-    }
-
 @app.post("/api/game/{game_id}/start")
-async def start_game(
-    game_id: str,
-    current_user: User = Depends(get_current_user)  # Fixed: using dependency correctly
-):
+async def start_game(game_id: str, current_user: Optional[User] = Depends(get_current_user)):
     if game_id not in games:
         raise HTTPException(status_code=404, detail="Game not found")
     
     game = games[game_id]
     
-    # Check if user is the creator
-    if game.creator_id != current_user.id:
+    # Check if user can start the game (creator or any player if no creator)
+    if game.creator_id and current_user and game.creator_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the game creator can start the game")
     
     if len(game.players) < 2:
@@ -565,11 +515,7 @@ async def start_game(
     }
 
 @app.post("/api/game/{game_id}/move")
-async def make_move(
-    game_id: str,
-    request: MoveRequest,
-    current_user: User = Depends(get_current_user)  # Fixed: using dependency correctly
-):
+async def make_move(game_id: str, request: MoveRequest, current_user: Optional[User] = Depends(get_current_user)):
     if game_id not in games:
         raise HTTPException(status_code=404, detail="Game not found")
     
@@ -585,8 +531,8 @@ async def make_move(
     
     player = game.players[player_index]
     
-    # Verify the user owns this player
-    if player.user_id != current_user.id:
+    # Verify the user owns this player (if authenticated)
+    if current_user and player.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="You don't own this player")
     
     # Process move
@@ -625,10 +571,8 @@ async def make_move(
     }
 
 @app.get("/api/game/{game_id}/state")
-async def get_game_state(
-    game_id: str,
-    current_user: User = Depends(get_current_user)  # Fixed: using dependency correctly
-):
+async def get_game_state(game_id: str):
+    """Get game state - no auth required for public viewing"""
     if game_id not in games:
         raise HTTPException(status_code=404, detail="Game not found")
     
@@ -652,12 +596,14 @@ async def get_game_state(
     game_state["players"] = enhanced_players
     
     return {
+        "success": True,
         "gameState": game_state,
         "lastMove": game.last_move
     }
 
 @app.get("/api/game/{game_id}/lobby")
 async def get_lobby_state(game_id: str):
+    """Get lobby state - no auth required"""
     if game_id not in games:
         raise HTTPException(status_code=404, detail="Game not found")
     
@@ -676,6 +622,7 @@ async def get_lobby_state(game_id: str):
         enhanced_players.append(player_data)
     
     return {
+        "success": True,
         "players": enhanced_players,
         "status": game.game_status,
         "roomCode": game.room_code,
@@ -737,17 +684,6 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str, token: Optional
                     "type": "chat",
                     "player": username,
                     "message": message["message"],
-                    "timestamp": datetime.now().isoformat()
-                })
-                
-            elif message["type"] == "move":
-                # Forward move to API
-                # Note: In a real implementation, you might want to handle moves directly here
-                # For now, we'll just broadcast that a move was made
-                await broadcast_message(game_id, {
-                    "type": "move_notification",
-                    "player": username,
-                    "moveType": message.get("moveType"),
                     "timestamp": datetime.now().isoformat()
                 })
                 
@@ -990,7 +926,7 @@ def process_move(game: Game, player_index: int, move_type: str, move_data: Dict)
 
 @app.get("/")
 async def root():
-    return {"message": "Tonk Game API is running", "status": "ok"}
+    return {"message": "Tonk Game API is running", "status": "ok", "docs": "/docs"}
 
 @app.get("/api/health")
 async def health_check():
