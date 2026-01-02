@@ -10,7 +10,7 @@ from enum import Enum
 import random
 from passlib.context import CryptContext
 from jose import JWTError, jwt
-from fastapi.encoders import jsonable_encoder  # Add this import
+from fastapi.encoders import jsonable_encoder
 
 # Security configuration
 SECRET_KEY = "your-secret-key-here-change-in-production"
@@ -110,10 +110,10 @@ class Game(BaseModel):
     discard_pile: List[Dict] = []
     under_card: Optional[Dict] = None
     current_player_index: int = 0
-    turn_phase: str = "draw"
+    turn_phase: str = "waiting"
     table_spreads: List[Dict] = []
-    turn_count: int = 1
-    game_status: str = "playing"
+    turn_count: int = 0
+    game_status: str = "lobby"  # Changed from "playing" to "lobby"
     created_at: datetime = Field(default_factory=datetime.now)
     last_move: Optional[Dict] = None
     settings: Dict = {"allow_under_card_any_turn": True}
@@ -315,7 +315,7 @@ async def create_game(request: CreateGameRequest, current_user: Optional[User] =
     game_id = str(uuid.uuid4())
     room_code = game_id[:6].upper()
     
-    # Create game players
+    # Create game players - CRITICAL FIX: Clear any existing hand data
     game_players = []
     for i, player_data in enumerate(request.players):
         player_name = player_data["name"]
@@ -333,7 +333,10 @@ async def create_game(request: CreateGameRequest, current_user: Optional[User] =
             id=str(uuid.uuid4()),
             user_id=user_id,
             name=player_name,
-            is_computer=player_data.get("is_computer", False)
+            is_computer=player_data.get("is_computer", False),
+            hand=[],  # Explicitly empty hand for lobby
+            spreads=[],  # Explicitly empty spreads for lobby
+            turns=0  # Explicitly set turns to 0
         )
         game_players.append(player)
     
@@ -368,7 +371,8 @@ async def create_game(request: CreateGameRequest, current_user: Optional[User] =
         discard_pile=[],
         under_card=None,
         game_status="lobby",
-        creator_id=creator_id
+        creator_id=creator_id,
+        turn_phase="waiting"  # Set to waiting, not draw
     )
     
     games[game_id] = game
@@ -411,12 +415,14 @@ async def join_game(room_code: str, request: JoinGameRequest, current_user: Opti
     if user_id and any(p.user_id == user_id for p in game.players):
         raise HTTPException(status_code=400, detail="You are already in this game")
     
-    # Create new player
+    # Create new player with empty hand
     player = Player(
         id=str(uuid.uuid4()),
         user_id=user_id,
         name=request.playerName,
-        is_computer=False
+        is_computer=False,
+        hand=[],  # Empty hand in lobby
+        spreads=[]  # Empty spreads in lobby
     )
     
     game.players.append(player)
@@ -493,9 +499,14 @@ async def start_game(game_id: str, current_user: Optional[User] = Depends(get_cu
     if game.game_status != "lobby":
         raise HTTPException(status_code=400, detail="Game already started")
     
-    # Clear player hands first
+    # Clear player hands first (in case they have any cards from lobby)
     for player in game.players:
-        player.hand = []
+        player.hand = []  # Clear any existing hand
+        player.turns = 0  # Reset turns
+    
+    # Reset game state
+    game.turn_count = 1
+    game.current_player_index = 0
     
     # Deal 5 cards to each player
     for player in game.players:
@@ -602,6 +613,14 @@ async def get_game_state(game_id: str):
     
     game = games[game_id]
     
+    # Safety check: Ensure game has players
+    if not game.players:
+        raise HTTPException(status_code=400, detail="Game has no players")
+    
+    # Safety check: Ensure current_player_index is valid
+    if game.current_player_index >= len(game.players):
+        game.current_player_index = 0
+    
     # Enhance player info with user data
     enhanced_players = []
     for player in game.players:
@@ -634,10 +653,18 @@ async def get_lobby_state(game_id: str):
     
     game = games[game_id]
     
+    # Safety check: Ensure game has players
+    if not game.players:
+        raise HTTPException(status_code=400, detail="Game has no players")
+    
     # Enhance player info with user data
     enhanced_players = []
     for player in game.players:
         player_data = player.model_dump()
+        # Ensure hand is empty in lobby state
+        player_data["hand"] = []
+        player_data["spreads"] = []
+        
         if player.user_id and player.user_id in users:
             user = users[player.user_id]
             player_data["user"] = {
@@ -749,6 +776,14 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str, token: Optional
 async def broadcast_game_state(game_id: str):
     if game_id in connections and game_id in games:
         game = games[game_id]
+        
+        # Safety check: Ensure game has players
+        if not game.players:
+            return
+        
+        # Safety check: Ensure current_player_index is valid
+        if game.current_player_index >= len(game.players):
+            game.current_player_index = 0
         
         # Enhance player info with user data
         enhanced_players = []
@@ -973,6 +1008,14 @@ async def get_game_state_by_room_code(room_code: str):
     game = next((g for g in games.values() if g.room_code == room_code), None)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
+    
+    # Safety check: Ensure game has players
+    if not game.players:
+        raise HTTPException(status_code=400, detail="Game has no players")
+    
+    # Safety check: Ensure current_player_index is valid
+    if game.current_player_index >= len(game.players):
+        game.current_player_index = 0
     
     # Enhance player info with user data
     enhanced_players = []
