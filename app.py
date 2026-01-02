@@ -10,6 +10,7 @@ from enum import Enum
 import random
 from passlib.context import CryptContext
 from jose import JWTError, jwt
+from fastapi.encoders import jsonable_encoder  # Add this import
 
 # Security configuration
 SECRET_KEY = "your-secret-key-here-change-in-production"
@@ -106,7 +107,7 @@ class Game(BaseModel):
     game_name: Optional[str] = None
     players: List[Player]
     deck: List[Dict]
-    discard_pile: List[Dict]
+    discard_pile: List[Dict] = []
     under_card: Optional[Dict] = None
     current_player_index: int = 0
     turn_phase: str = "draw"
@@ -377,12 +378,15 @@ async def create_game(request: CreateGameRequest, current_user: Optional[User] =
     if creator_id:
         active_games_by_user[creator_id] = game_id
     
+    # Use jsonable_encoder to handle serialization
+    players_data = jsonable_encoder([p.model_dump() for p in game_players])
+    
     return {
         "success": True,
         "gameId": game_id,
         "roomCode": room_code,
         "playerId": game_players[0].id,
-        "players": [p.model_dump() for p in game_players],
+        "players": players_data,
         "gameName": game.game_name
     }
 
@@ -424,11 +428,14 @@ async def join_game(room_code: str, request: JoinGameRequest, current_user: Opti
     # Broadcast update
     await broadcast_game_state(game.id)
     
+    # Use jsonable_encoder for proper serialization
+    game_data = jsonable_encoder(game.model_dump())
+    
     return {
         "success": True,
         "gameId": game.id,
         "playerId": player.id,
-        "gameState": game.model_dump()
+        "gameState": game_data
     }
 
 @app.get("/api/game/available")
@@ -437,11 +444,14 @@ async def get_available_games():
     available_games = []
     for game in games.values():
         if game.game_status == "lobby" and len(game.players) < game.max_players:
+            # Use jsonable_encoder for proper serialization
+            players_data = jsonable_encoder([p.model_dump() for p in game.players])
+            
             available_games.append({
                 "gameId": game.id,
                 "roomCode": game.room_code,
                 "gameName": game.game_name,
-                "players": [p.model_dump() for p in game.players],
+                "players": players_data,
                 "currentPlayers": len(game.players),
                 "maxPlayers": game.max_players,
                 "creator": game.creator_id,
@@ -483,6 +493,10 @@ async def start_game(game_id: str, current_user: Optional[User] = Depends(get_cu
     if game.game_status != "lobby":
         raise HTTPException(status_code=400, detail="Game already started")
     
+    # Clear player hands first
+    for player in game.players:
+        player.hand = []
+    
     # Deal 5 cards to each player
     for player in game.players:
         for _ in range(5):
@@ -492,6 +506,7 @@ async def start_game(game_id: str, current_user: Optional[User] = Depends(get_cu
                 player.hand.append(card)
     
     # Setup discard pile and under card
+    game.discard_pile = []  # Clear discard pile
     if game.deck:
         first_card = game.deck.pop()
         first_card["isFaceUp"] = True
@@ -509,9 +524,15 @@ async def start_game(game_id: str, current_user: Optional[User] = Depends(get_cu
     # Broadcast game start
     await broadcast_game_state(game_id)
     
+    # Use jsonable_encoder for proper serialization
+    game_data = jsonable_encoder(game.model_dump())
+    
     return {
         "success": True,
-        "gameState": game.model_dump(),
+        "gameId": game.id,
+        "roomCode": game.room_code,
+        "status": game.game_status,
+        "gameState": game_data,
     }
 
 @app.post("/api/game/{game_id}/move")
@@ -564,9 +585,12 @@ async def make_move(game_id: str, request: MoveRequest, current_user: Optional[U
     # Broadcast update
     await broadcast_game_state(game_id)
     
+    # Use jsonable_encoder for proper serialization
+    game_data = jsonable_encoder(game.model_dump())
+    
     return {
         "success": True,
-        "gameState": game.model_dump(),
+        "gameState": game_data,
         "lastMove": game.last_move
     }
 
@@ -592,8 +616,9 @@ async def get_game_state(game_id: str):
             }
         enhanced_players.append(player_data)
     
-    game_state = game.model_dump()
-    game_state["players"] = enhanced_players
+    # Use jsonable_encoder for proper serialization
+    game_state = jsonable_encoder(game.model_dump())
+    game_state["players"] = jsonable_encoder(enhanced_players)
     
     return {
         "success": True,
@@ -621,9 +646,12 @@ async def get_lobby_state(game_id: str):
             }
         enhanced_players.append(player_data)
     
+    # Use jsonable_encoder for proper serialization
+    players_data = jsonable_encoder(enhanced_players)
+    
     return {
         "success": True,
-        "players": enhanced_players,
+        "players": players_data,
         "status": game.game_status,
         "roomCode": game.room_code,
         "gameName": game.game_name,
@@ -736,14 +764,15 @@ async def broadcast_game_state(game_id: str):
                 }
             enhanced_players.append(player_data)
         
-        game_state = game.model_dump()
-        game_state["players"] = enhanced_players
+        # Use jsonable_encoder for proper serialization
+        game_state = jsonable_encoder(game.model_dump())
+        game_state["players"] = jsonable_encoder(enhanced_players)
         
         message = json.dumps({
             "type": "state_update", 
             "gameState": game_state,
             "timestamp": datetime.now().isoformat()
-        })
+        }, default=str)  # Add default=str to handle datetime objects
         
         for connection in connections[game_id]:
             try:
@@ -753,7 +782,7 @@ async def broadcast_game_state(game_id: str):
 
 async def broadcast_message(game_id: str, message: Dict):
     if game_id in connections:
-        message_json = json.dumps(message)
+        message_json = json.dumps(message, default=str)  # Add default=str
         for connection in connections[game_id]:
             try:
                 await connection.send_text(message_json)
@@ -959,8 +988,9 @@ async def get_game_state_by_room_code(room_code: str):
             }
         enhanced_players.append(player_data)
     
-    game_state = game.model_dump()
-    game_state["players"] = enhanced_players
+    # Use jsonable_encoder for proper serialization
+    game_state = jsonable_encoder(game.model_dump())
+    game_state["players"] = jsonable_encoder(enhanced_players)
     
     return {
         "success": True,
