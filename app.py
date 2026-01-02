@@ -923,6 +923,50 @@ def process_move(game: Game, player_index: int, move_type: str, move_data: Dict)
                     player.last_move = f"Hit a spread and took {len(spread['cards'])} cards"
     
     return {"success": True}
+    
+@app.get("/api/game/room/{room_code}/id")
+async def get_game_id_by_room_code(room_code: str):
+    """Get game ID from room code"""
+    game = next((g for g in games.values() if g.room_code == room_code), None)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    
+    return {
+        "success": True,
+        "gameId": game.id,
+        "roomCode": game.room_code,
+        "status": game.game_status
+    }
+
+@app.get("/api/game/room/{room_code}/state")
+async def get_game_state_by_room_code(room_code: str):
+    """Get game state using room code"""
+    game = next((g for g in games.values() if g.room_code == room_code), None)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    
+    # Enhance player info with user data
+    enhanced_players = []
+    for player in game.players:
+        player_data = player.model_dump()
+        if player.user_id and player.user_id in users:
+            user = users[player.user_id]
+            player_data["user"] = {
+                "username": user.username,
+                "games_played": user.games_played,
+                "games_won": user.games_won,
+                "online": user.online
+            }
+        enhanced_players.append(player_data)
+    
+    game_state = game.model_dump()
+    game_state["players"] = enhanced_players
+    
+    return {
+        "success": True,
+        "gameState": game_state,
+        "lastMove": game.last_move
+    }
 
 @app.get("/")
 async def root():
