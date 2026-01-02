@@ -246,6 +246,26 @@ def get_user_by_username(username: str) -> Optional[User]:
             )
     return None
 
+def get_user_by_id(user_id: str) -> Optional[User]:
+    """Get user from database by ID"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        if row:
+            return User(
+                id=row['id'],
+                username=row['username'],
+                email=row['email'],
+                hashed_password=row['hashed_password'],
+                created_at=datetime.fromisoformat(row['created_at']),
+                games_played=row['games_played'],
+                games_won=row['games_won'],
+                online=bool(row['online']),
+                last_seen=datetime.fromisoformat(row['last_seen']) if row['last_seen'] else None
+            )
+    return None
+
 def get_user_by_email(email: str) -> Optional[User]:
     """Get user from database by email"""
     with get_db_connection() as conn:
@@ -493,7 +513,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-# NEW: Simple authorization header dependency
+# Simple authorization header dependency
 async def get_current_user(authorization: Optional[str] = Header(None)):
     """Get current user from Authorization header"""
     if not authorization:
@@ -917,7 +937,7 @@ async def make_move(game_id: str, request: MoveRequest, current_user: Optional[U
         # Update user stats for all players
         for p in game.players:
             if p.user_id:
-                user = get_user_by_username(p.user_id)  # Need to get by ID, not username
+                user = get_user_by_id(p.user_id)  # FIXED: Use get_user_by_id instead of get_user_by_username
                 if user:
                     user.games_played += 1
                     if p.id == game.winner:
@@ -959,7 +979,7 @@ async def get_game_state(game_id: str):
     for player in game.players:
         player_data = player.model_dump()
         if player.user_id:
-            user = get_user_by_username(player.user_id)  # Need to get by ID
+            user = get_user_by_id(player.user_id)  # FIXED: Use get_user_by_id
             if user:
                 player_data["user"] = {
                     "username": user.username,
@@ -999,7 +1019,7 @@ async def get_lobby_state(game_id: str):
         player_data["spreads"] = []
         
         if player.user_id:
-            user = get_user_by_username(player.user_id)  # Need to get by ID
+            user = get_user_by_id(player.user_id)  # FIXED: Use get_user_by_id
             if user:
                 player_data["user"] = {
                     "username": user.username,
@@ -1084,7 +1104,7 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str, token: Optional
             elif message["type"] == "ping":
                 # Keep connection alive and update user status
                 if user_id and user_id in user_connections:
-                    user = get_user_by_username(user_id)  # Need to get by ID
+                    user = get_user_by_id(user_id)  # FIXED: Use get_user_by_id
                     if user:
                         user.last_seen = datetime.now()
                         save_user(user)
@@ -1116,7 +1136,7 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str, token: Optional
         if user_id and user_id in user_connections:
             del user_connections[user_id]
             if user_id:
-                user = get_user_by_username(user_id)  # Need to get by ID
+                user = get_user_by_id(user_id)  # FIXED: Use get_user_by_id
                 if user:
                     user.online = False
                     user.last_seen = datetime.now()
@@ -1141,7 +1161,7 @@ async def broadcast_game_state(game_id: str):
         for player in game.players:
             player_data = player.model_dump()
             if player.user_id:
-                user = get_user_by_username(player.user_id)  # Need to get by ID
+                user = get_user_by_id(player.user_id)  # FIXED: Use get_user_by_id
                 if user:
                     player_data["user"] = {
                         "username": user.username,
@@ -1374,7 +1394,7 @@ async def get_game_state_by_room_code(room_code: str):
     for player in game.players:
         player_data = player.model_dump()
         if player.user_id:
-            user = get_user_by_username(player.user_id)  # Need to get by ID
+            user = get_user_by_id(player.user_id)  # FIXED: Use get_user_by_id
             if user:
                 player_data["user"] = {
                     "username": user.username,
