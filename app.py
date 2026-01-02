@@ -11,6 +11,9 @@ import random
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from fastapi.encoders import jsonable_encoder
+import sqlite3
+import os
+from contextlib import contextmanager
 
 # Security configuration
 SECRET_KEY = "your-secret-key-here-change-in-production"
@@ -30,6 +33,101 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Database setup
+DATABASE_URL = "tonk_game.db"
+
+def init_database():
+    """Initialize SQLite database with tables"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Users table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            hashed_password TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            games_played INTEGER DEFAULT 0,
+            games_won INTEGER DEFAULT 0,
+            online BOOLEAN DEFAULT 0,
+            last_seen TIMESTAMP
+        )
+        ''')
+        
+        # Games table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS games (
+            id TEXT PRIMARY KEY,
+            room_code TEXT UNIQUE NOT NULL,
+            game_name TEXT,
+            deck TEXT,  -- JSON serialized
+            discard_pile TEXT,  -- JSON serialized
+            under_card TEXT,  -- JSON serialized
+            current_player_index INTEGER DEFAULT 0,
+            turn_phase TEXT DEFAULT 'waiting',
+            table_spreads TEXT,  -- JSON serialized
+            turn_count INTEGER DEFAULT 0,
+            game_status TEXT DEFAULT 'lobby',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_move TEXT,  -- JSON serialized
+            settings TEXT DEFAULT '{"allow_under_card_any_turn": true}',  -- JSON serialized
+            winner TEXT,
+            win_reason TEXT,
+            creator_id TEXT,
+            max_players INTEGER DEFAULT 4,
+            FOREIGN KEY (creator_id) REFERENCES users(id)
+        )
+        ''')
+        
+        # Players table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS players (
+            id TEXT PRIMARY KEY,
+            game_id TEXT NOT NULL,
+            user_id TEXT,
+            name TEXT NOT NULL,
+            is_computer BOOLEAN DEFAULT 0,
+            hand TEXT DEFAULT '[]',  -- JSON serialized
+            spreads TEXT DEFAULT '[]',  -- JSON serialized
+            has_dropped BOOLEAN DEFAULT 0,
+            score INTEGER DEFAULT 0,
+            last_move TEXT,
+            turns INTEGER DEFAULT 0,
+            has_drawn_from_under BOOLEAN DEFAULT 0,
+            is_online BOOLEAN DEFAULT 1,
+            position INTEGER,
+            FOREIGN KEY (game_id) REFERENCES games(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        ''')
+        
+        # Active games (for quick lookup)
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS active_games_by_user (
+            user_id TEXT PRIMARY KEY,
+            game_id TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (game_id) REFERENCES games(id)
+        )
+        ''')
+        
+        conn.commit()
+
+@contextmanager
+def get_db_connection():
+    """Get a database connection with proper cleanup"""
+    conn = sqlite3.connect(DATABASE_URL, check_same_thread=False)
+    conn.row_factory = sqlite3.Row  # Return rows as dictionaries
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+# Initialize database on startup
+init_database()
 
 # --- Authentication Models ---
 class UserRegister(BaseModel):
@@ -65,11 +163,11 @@ class TokenData(BaseModel):
 class CreateGameRequest(BaseModel):
     players: List[Dict]
     game_name: Optional[str] = None
-    userId: Optional[str] = None  # Changed to match frontend
+    userId: Optional[str] = None
 
 class JoinGameRequest(BaseModel):
     playerName: str
-    userId: Optional[str] = None  # Changed to match frontend
+    userId: Optional[str] = None
 
 class MoveRequest(BaseModel):
     playerId: str
@@ -113,7 +211,7 @@ class Game(BaseModel):
     turn_phase: str = "waiting"
     table_spreads: List[Dict] = []
     turn_count: int = 0
-    game_status: str = "lobby"  # Changed from "playing" to "lobby"
+    game_status: str = "lobby"
     created_at: datetime = Field(default_factory=datetime.now)
     last_move: Optional[Dict] = None
     settings: Dict = {"allow_under_card_any_turn": True}
@@ -122,13 +220,253 @@ class Game(BaseModel):
     creator_id: Optional[str] = None
     max_players: int = 4
 
-# Data storage
-users: Dict[str, User] = {}
-games: Dict[str, Game] = {}
+# In-memory storage for active connections (still needed for WebSocket)
 connections: Dict[str, List[WebSocket]] = {}
 player_connections: Dict[str, WebSocket] = {}
 user_connections: Dict[str, WebSocket] = {}
-active_games_by_user: Dict[str, str] = {}  # user_id -> game_id
+
+# --- Database Helper Functions ---
+def get_user_by_username(username: str) -> Optional[User]:
+    """Get user from database by username"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+        row = cursor.fetchone()
+        if row:
+            return User(
+                id=row['id'],
+                username=row['username'],
+                email=row['email'],
+                hashed_password=row['hashed_password'],
+                created_at=datetime.fromisoformat(row['created_at']),
+                games_played=row['games_played'],
+                games_won=row['games_won'],
+                online=bool(row['online']),
+                last_seen=datetime.fromisoformat(row['last_seen']) if row['last_seen'] else None
+            )
+    return None
+
+def get_user_by_email(email: str) -> Optional[User]:
+    """Get user from database by email"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
+        row = cursor.fetchone()
+        if row:
+            return User(
+                id=row['id'],
+                username=row['username'],
+                email=row['email'],
+                hashed_password=row['hashed_password'],
+                created_at=datetime.fromisoformat(row['created_at']),
+                games_played=row['games_played'],
+                games_won=row['games_won'],
+                online=bool(row['online']),
+                last_seen=datetime.fromisoformat(row['last_seen']) if row['last_seen'] else None
+            )
+    return None
+
+def save_user(user: User):
+    """Save or update user in database"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO users 
+            (id, username, email, hashed_password, created_at, games_played, games_won, online, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            user.id,
+            user.username,
+            user.email,
+            user.hashed_password,
+            user.created_at.isoformat(),
+            user.games_played,
+            user.games_won,
+            1 if user.online else 0,
+            user.last_seen.isoformat() if user.last_seen else None
+        ))
+        conn.commit()
+
+def get_game_from_db(game_id: str) -> Optional[Game]:
+    """Retrieve game from database"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Get game
+        cursor.execute("SELECT * FROM games WHERE id = ?", (game_id,))
+        game_row = cursor.fetchone()
+        if not game_row:
+            return None
+        
+        # Get players for this game
+        cursor.execute("SELECT * FROM players WHERE game_id = ? ORDER BY position", (game_id,))
+        player_rows = cursor.fetchall()
+        
+        players = []
+        for row in player_rows:
+            players.append(Player(
+                id=row['id'],
+                user_id=row['user_id'],
+                name=row['name'],
+                is_computer=bool(row['is_computer']),
+                hand=json.loads(row['hand']),
+                spreads=json.loads(row['spreads']),
+                has_dropped=bool(row['has_dropped']),
+                score=row['score'],
+                last_move=row['last_move'],
+                turns=row['turns'],
+                has_drawn_from_under=bool(row['has_drawn_from_under']),
+                is_online=bool(row['is_online'])
+            ))
+        
+        # Parse JSON fields
+        deck = json.loads(game_row['deck']) if game_row['deck'] else []
+        discard_pile = json.loads(game_row['discard_pile']) if game_row['discard_pile'] else []
+        under_card = json.loads(game_row['under_card']) if game_row['under_card'] else None
+        table_spreads = json.loads(game_row['table_spreads']) if game_row['table_spreads'] else []
+        last_move = json.loads(game_row['last_move']) if game_row['last_move'] else None
+        settings = json.loads(game_row['settings']) if game_row['settings'] else {"allow_under_card_any_turn": True}
+        
+        return Game(
+            id=game_row['id'],
+            room_code=game_row['room_code'],
+            game_name=game_row['game_name'],
+            players=players,
+            deck=deck,
+            discard_pile=discard_pile,
+            under_card=under_card,
+            current_player_index=game_row['current_player_index'],
+            turn_phase=game_row['turn_phase'],
+            table_spreads=table_spreads,
+            turn_count=game_row['turn_count'],
+            game_status=game_row['game_status'],
+            created_at=datetime.fromisoformat(game_row['created_at']),
+            last_move=last_move,
+            settings=settings,
+            winner=game_row['winner'],
+            win_reason=game_row['win_reason'],
+            creator_id=game_row['creator_id'],
+            max_players=game_row['max_players']
+        )
+
+def save_game_to_db(game: Game):
+    """Save or update game in database"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Save game
+        cursor.execute('''
+            INSERT OR REPLACE INTO games 
+            (id, room_code, game_name, deck, discard_pile, under_card, current_player_index, 
+             turn_phase, table_spreads, turn_count, game_status, created_at, last_move, 
+             settings, winner, win_reason, creator_id, max_players)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            game.id,
+            game.room_code,
+            game.game_name,
+            json.dumps(game.deck, default=str),
+            json.dumps(game.discard_pile, default=str),
+            json.dumps(game.under_card, default=str) if game.under_card else None,
+            game.current_player_index,
+            game.turn_phase,
+            json.dumps(game.table_spreads, default=str),
+            game.turn_count,
+            game.game_status,
+            game.created_at.isoformat(),
+            json.dumps(game.last_move, default=str) if game.last_move else None,
+            json.dumps(game.settings, default=str),
+            game.winner,
+            game.win_reason,
+            game.creator_id,
+            game.max_players
+        ))
+        
+        # Save players
+        for i, player in enumerate(game.players):
+            cursor.execute('''
+                INSERT OR REPLACE INTO players 
+                (id, game_id, user_id, name, is_computer, hand, spreads, has_dropped, 
+                 score, last_move, turns, has_drawn_from_under, is_online, position)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                player.id,
+                game.id,
+                player.user_id,
+                player.name,
+                1 if player.is_computer else 0,
+                json.dumps(player.hand, default=str),
+                json.dumps(player.spreads, default=str),
+                1 if player.has_dropped else 0,
+                player.score,
+                player.last_move,
+                player.turns,
+                1 if player.has_drawn_from_under else 0,
+                1 if player.is_online else 0,
+                i  # position for ordering
+            ))
+        
+        conn.commit()
+
+def get_game_by_room_code(room_code: str) -> Optional[Game]:
+    """Get game by room code"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM games WHERE room_code = ?", (room_code,))
+        row = cursor.fetchone()
+        if row:
+            return get_game_from_db(row['id'])
+    return None
+
+def get_active_game_for_user(user_id: str) -> Optional[str]:
+    """Get active game ID for user"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT game_id FROM active_games_by_user WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        return row['game_id'] if row else None
+
+def set_active_game_for_user(user_id: str, game_id: str):
+    """Set active game for user"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO active_games_by_user (user_id, game_id)
+            VALUES (?, ?)
+        ''', (user_id, game_id))
+        conn.commit()
+
+def clear_active_game_for_user(user_id: str):
+    """Clear active game for user"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM active_games_by_user WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+def get_available_games_from_db():
+    """Get all games in lobby status with available slots"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT g.*, COUNT(p.id) as player_count
+            FROM games g
+            LEFT JOIN players p ON g.id = p.game_id
+            WHERE g.game_status = 'lobby'
+            GROUP BY g.id
+            HAVING player_count < g.max_players
+        ''')
+        games = []
+        for row in cursor.fetchall():
+            games.append({
+                "gameId": row['id'],
+                "roomCode": row['room_code'],
+                "gameName": row['game_name'],
+                "currentPlayers": row['player_count'],
+                "maxPlayers": row['max_players'],
+                "creator": row['creator_id'],
+                "createdAt": row['created_at']
+            })
+        return games
 
 # --- Authentication Functions ---
 def verify_password(plain_password, hashed_password):
@@ -136,18 +474,6 @@ def verify_password(plain_password, hashed_password):
 
 def get_password_hash(password):
     return pwd_context.hash(password)
-
-def get_user_by_username(username: str):
-    for user in users.values():
-        if user.username == username:
-            return user
-    return None
-
-def get_user_by_email(email: str):
-    for user in users.values():
-        if user.email == email:
-            return user
-    return None
 
 def authenticate_user(username: str, password: str):
     user = get_user_by_username(username)
@@ -213,10 +539,16 @@ async def register(user_data: UserRegister):
         id=user_id,
         username=user_data.username,
         email=user_data.email,
-        hashed_password=hashed_password
+        hashed_password=hashed_password,
+        created_at=datetime.now(),
+        games_played=0,
+        games_won=0,
+        online=True,
+        last_seen=datetime.now()
     )
     
-    users[user_id] = user
+    # Save to database
+    save_user(user)
     
     # Create access token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -241,9 +573,10 @@ async def login(user_data: UserLogin):
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Update user status
+    # Update user status in database
     user.online = True
     user.last_seen = datetime.now()
+    save_user(user)
     
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
@@ -265,6 +598,7 @@ async def get_user_profile(current_user: Optional[User] = Depends(get_current_us
     return {
         "id": current_user.id,
         "username": current_user.username,
+        "email": current_user.email,
         "games_played": current_user.games_played,
         "games_won": current_user.games_won,
         "online": current_user.online,
@@ -273,15 +607,18 @@ async def get_user_profile(current_user: Optional[User] = Depends(get_current_us
 
 @app.get("/api/auth/online-users")
 async def get_online_users():
-    online_users = []
-    for user in users.values():
-        if user.online:
+    """Get online users from database"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE online = 1")
+        online_users = []
+        for row in cursor.fetchall():
             online_users.append({
-                "id": user.id,
-                "username": user.username,
-                "last_seen": user.last_seen.isoformat() if user.last_seen else None
+                "id": row['id'],
+                "username": row['username'],
+                "last_seen": row['last_seen']
             })
-    return {"online_users": online_users}
+        return {"online_users": online_users}
 
 @app.get("/api/auth/validate-token")
 async def validate_token(authorization: Optional[str] = Header(None)):
@@ -315,7 +652,7 @@ async def create_game(request: CreateGameRequest, current_user: Optional[User] =
     game_id = str(uuid.uuid4())
     room_code = game_id[:6].upper()
     
-    # Create game players - CRITICAL FIX: Clear any existing hand data
+    # Create game players
     game_players = []
     for i, player_data in enumerate(request.players):
         player_name = player_data["name"]
@@ -375,12 +712,14 @@ async def create_game(request: CreateGameRequest, current_user: Optional[User] =
         turn_phase="waiting"  # Set to waiting, not draw
     )
     
-    games[game_id] = game
-    connections[game_id] = []
+    # Save to database
+    save_game_to_db(game)
     
     # Track active game for user
     if creator_id:
-        active_games_by_user[creator_id] = game_id
+        set_active_game_for_user(creator_id, game_id)
+    
+    connections[game_id] = []
     
     # Use jsonable_encoder to handle serialization
     players_data = jsonable_encoder([p.model_dump() for p in game_players])
@@ -398,7 +737,7 @@ async def create_game(request: CreateGameRequest, current_user: Optional[User] =
 async def join_game(room_code: str, request: JoinGameRequest, current_user: Optional[User] = Depends(get_current_user)):
     """Join an existing game - supports both authenticated and guest users"""
     # Find game by room code
-    game = next((g for g in games.values() if g.room_code == room_code), None)
+    game = get_game_by_room_code(room_code)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     
@@ -429,7 +768,10 @@ async def join_game(room_code: str, request: JoinGameRequest, current_user: Opti
     
     # Track active game for user
     if user_id:
-        active_games_by_user[user_id] = game.id
+        set_active_game_for_user(user_id, game.id)
+    
+    # Save updated game to database
+    save_game_to_db(game)
     
     # Broadcast update
     await broadcast_game_state(game.id)
@@ -447,30 +789,15 @@ async def join_game(room_code: str, request: JoinGameRequest, current_user: Opti
 @app.get("/api/game/available")
 async def get_available_games():
     """Get list of available games - no auth required"""
-    available_games = []
-    for game in games.values():
-        if game.game_status == "lobby" and len(game.players) < game.max_players:
-            # Use jsonable_encoder for proper serialization
-            players_data = jsonable_encoder([p.model_dump() for p in game.players])
-            
-            available_games.append({
-                "gameId": game.id,
-                "roomCode": game.room_code,
-                "gameName": game.game_name,
-                "players": players_data,
-                "currentPlayers": len(game.players),
-                "maxPlayers": game.max_players,
-                "creator": game.creator_id,
-                "createdAt": game.created_at.isoformat()
-            })
+    available_games = get_available_games_from_db()
     return {"available_games": available_games}
 
 @app.get("/api/game/user/{user_id}/active")
 async def get_user_active_game(user_id: str):
-    if user_id in active_games_by_user:
-        game_id = active_games_by_user[user_id]
-        if game_id in games:
-            game = games[game_id]
+    game_id = get_active_game_for_user(user_id)
+    if game_id:
+        game = get_game_from_db(game_id)
+        if game:
             player_index = next((i for i, p in enumerate(game.players) if p.user_id == user_id), -1)
             return {
                 "hasActiveGame": True,
@@ -484,10 +811,9 @@ async def get_user_active_game(user_id: str):
 
 @app.post("/api/game/{game_id}/start")
 async def start_game(game_id: str, current_user: Optional[User] = Depends(get_current_user)):
-    if game_id not in games:
+    game = get_game_from_db(game_id)
+    if not game:
         raise HTTPException(status_code=404, detail="Game not found")
-    
-    game = games[game_id]
     
     # Check if user can start the game (creator or any player if no creator)
     if game.creator_id and current_user and game.creator_id != current_user.id:
@@ -532,6 +858,9 @@ async def start_game(game_id: str, current_user: Optional[User] = Depends(get_cu
     game.turn_phase = "draw"
     game.turn_count = 1
     
+    # Save to database
+    save_game_to_db(game)
+    
     # Broadcast game start
     await broadcast_game_state(game_id)
     
@@ -548,10 +877,10 @@ async def start_game(game_id: str, current_user: Optional[User] = Depends(get_cu
 
 @app.post("/api/game/{game_id}/move")
 async def make_move(game_id: str, request: MoveRequest, current_user: Optional[User] = Depends(get_current_user)):
-    if game_id not in games:
+    game = get_game_from_db(game_id)
+    if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     
-    game = games[game_id]
     player_index = next((i for i, p in enumerate(game.players) if p.id == request.playerId), -1)
     
     if player_index == -1:
@@ -587,11 +916,16 @@ async def make_move(game_id: str, request: MoveRequest, current_user: Optional[U
         
         # Update user stats for all players
         for p in game.players:
-            if p.user_id and p.user_id in users:
-                user = users[p.user_id]
-                user.games_played += 1
-                if p.id == game.winner:
-                    user.games_won += 1
+            if p.user_id:
+                user = get_user_by_username(p.user_id)  # Need to get by ID, not username
+                if user:
+                    user.games_played += 1
+                    if p.id == game.winner:
+                        user.games_won += 1
+                    save_user(user)
+    
+    # Save updated game to database
+    save_game_to_db(game)
     
     # Broadcast update
     await broadcast_game_state(game_id)
@@ -608,10 +942,9 @@ async def make_move(game_id: str, request: MoveRequest, current_user: Optional[U
 @app.get("/api/game/{game_id}/state")
 async def get_game_state(game_id: str):
     """Get game state - no auth required for public viewing"""
-    if game_id not in games:
+    game = get_game_from_db(game_id)
+    if not game:
         raise HTTPException(status_code=404, detail="Game not found")
-    
-    game = games[game_id]
     
     # Safety check: Ensure game has players
     if not game.players:
@@ -625,14 +958,15 @@ async def get_game_state(game_id: str):
     enhanced_players = []
     for player in game.players:
         player_data = player.model_dump()
-        if player.user_id and player.user_id in users:
-            user = users[player.user_id]
-            player_data["user"] = {
-                "username": user.username,
-                "games_played": user.games_played,
-                "games_won": user.games_won,
-                "online": user.online
-            }
+        if player.user_id:
+            user = get_user_by_username(player.user_id)  # Need to get by ID
+            if user:
+                player_data["user"] = {
+                    "username": user.username,
+                    "games_played": user.games_played,
+                    "games_won": user.games_won,
+                    "online": user.online
+                }
         enhanced_players.append(player_data)
     
     # Use jsonable_encoder for proper serialization
@@ -648,10 +982,9 @@ async def get_game_state(game_id: str):
 @app.get("/api/game/{game_id}/lobby")
 async def get_lobby_state(game_id: str):
     """Get lobby state - no auth required"""
-    if game_id not in games:
+    game = get_game_from_db(game_id)
+    if not game:
         raise HTTPException(status_code=404, detail="Game not found")
-    
-    game = games[game_id]
     
     # Safety check: Ensure game has players
     if not game.players:
@@ -665,12 +998,13 @@ async def get_lobby_state(game_id: str):
         player_data["hand"] = []
         player_data["spreads"] = []
         
-        if player.user_id and player.user_id in users:
-            user = users[player.user_id]
-            player_data["user"] = {
-                "username": user.username,
-                "online": user.online
-            }
+        if player.user_id:
+            user = get_user_by_username(player.user_id)  # Need to get by ID
+            if user:
+                player_data["user"] = {
+                    "username": user.username,
+                    "online": user.online
+                }
         enhanced_players.append(player_data)
     
     # Use jsonable_encoder for proper serialization
@@ -704,6 +1038,7 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str, token: Optional
                 user_id = user.id
                 user.online = True
                 user.last_seen = datetime.now()
+                save_user(user)
                 user_connections[user_id] = websocket
         except:
             pass
@@ -722,13 +1057,17 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str, token: Optional
                 player_id = message["playerId"]
                 player_connections[player_id] = websocket
                 
-                # Update player online status
-                if game_id in games:
-                    game = games[game_id]
+                # Update player online status in database
+                game = get_game_from_db(game_id)
+                if game:
+                    player_updated = False
                     for player in game.players:
                         if player.id == player_id and user_id:
                             player.user_id = user_id
                             player.is_online = True
+                            player_updated = True
+                    if player_updated:
+                        save_game_to_db(game)
                 
                 # Broadcast updated game state
                 await broadcast_game_state(game_id)
@@ -744,8 +1083,11 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str, token: Optional
                 
             elif message["type"] == "ping":
                 # Keep connection alive and update user status
-                if user_id and user_id in users:
-                    users[user_id].last_seen = datetime.now()
+                if user_id and user_id in user_connections:
+                    user = get_user_by_username(user_id)  # Need to get by ID
+                    if user:
+                        user.last_seen = datetime.now()
+                        save_user(user)
                 await websocket.send_text(json.dumps({"type": "pong"}))
                 
     except WebSocketDisconnect:
@@ -758,24 +1100,33 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str, token: Optional
         if player_id:
             del player_connections[player_id]
             
-            # Update player offline status
-            if game_id in games:
-                game = games[game_id]
+            # Update player offline status in database
+            game = get_game_from_db(game_id)
+            if game:
+                player_updated = False
                 for player in game.players:
                     if player.id == player_id:
                         player.is_online = False
+                        player_updated = True
+                if player_updated:
+                    save_game_to_db(game)
                 await broadcast_game_state(game_id)
         
         # Remove user connection
         if user_id and user_id in user_connections:
             del user_connections[user_id]
-            if user_id in users:
-                users[user_id].online = False
-                users[user_id].last_seen = datetime.now()
+            if user_id:
+                user = get_user_by_username(user_id)  # Need to get by ID
+                if user:
+                    user.online = False
+                    user.last_seen = datetime.now()
+                    save_user(user)
 
 async def broadcast_game_state(game_id: str):
-    if game_id in connections and game_id in games:
-        game = games[game_id]
+    if game_id in connections:
+        game = get_game_from_db(game_id)
+        if not game:
+            return
         
         # Safety check: Ensure game has players
         if not game.players:
@@ -789,14 +1140,15 @@ async def broadcast_game_state(game_id: str):
         enhanced_players = []
         for player in game.players:
             player_data = player.model_dump()
-            if player.user_id and player.user_id in users:
-                user = users[player.user_id]
-                player_data["user"] = {
-                    "username": user.username,
-                    "games_played": user.games_played,
-                    "games_won": user.games_won,
-                    "online": user.online
-                }
+            if player.user_id:
+                user = get_user_by_username(player.user_id)  # Need to get by ID
+                if user:
+                    player_data["user"] = {
+                        "username": user.username,
+                        "games_played": user.games_played,
+                        "games_won": user.games_won,
+                        "online": user.online
+                    }
             enhanced_players.append(player_data)
         
         # Use jsonable_encoder for proper serialization
@@ -991,7 +1343,7 @@ def process_move(game: Game, player_index: int, move_type: str, move_data: Dict)
 @app.get("/api/game/room/{room_code}/id")
 async def get_game_id_by_room_code(room_code: str):
     """Get game ID from room code"""
-    game = next((g for g in games.values() if g.room_code == room_code), None)
+    game = get_game_by_room_code(room_code)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     
@@ -1005,7 +1357,7 @@ async def get_game_id_by_room_code(room_code: str):
 @app.get("/api/game/room/{room_code}/state")
 async def get_game_state_by_room_code(room_code: str):
     """Get game state using room code"""
-    game = next((g for g in games.values() if g.room_code == room_code), None)
+    game = get_game_by_room_code(room_code)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     
@@ -1021,14 +1373,15 @@ async def get_game_state_by_room_code(room_code: str):
     enhanced_players = []
     for player in game.players:
         player_data = player.model_dump()
-        if player.user_id and player.user_id in users:
-            user = users[player.user_id]
-            player_data["user"] = {
-                "username": user.username,
-                "games_played": user.games_played,
-                "games_won": user.games_won,
-                "online": user.online
-            }
+        if player.user_id:
+            user = get_user_by_username(player.user_id)  # Need to get by ID
+            if user:
+                player_data["user"] = {
+                    "username": user.username,
+                    "games_played": user.games_played,
+                    "games_won": user.games_won,
+                    "online": user.online
+                }
         enhanced_players.append(player_data)
     
     # Use jsonable_encoder for proper serialization
@@ -1047,13 +1400,31 @@ async def root():
 
 @app.get("/api/health")
 async def health_check():
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "games_count": len(games),
-        "users_count": len(users),
-        "connections_count": sum(len(conns) for conns in connections.values())
-    }
+    """Health check with database connection test"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as user_count FROM users")
+            user_count = cursor.fetchone()['user_count']
+            
+            cursor.execute("SELECT COUNT(*) as game_count FROM games")
+            game_count = cursor.fetchone()['game_count']
+            
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "database": "connected",
+            "users_count": user_count,
+            "games_count": game_count,
+            "connections_count": sum(len(conns) for conns in connections.values())
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "timestamp": datetime.now().isoformat(),
+            "database": "error",
+            "error": str(e)
+        }
 
 if __name__ == "__main__":
     import uvicorn
