@@ -1,10 +1,11 @@
-# app.py - Main FastAPI app
+# app.py - Updated for frontend compatibility
 from fastapi import FastAPI, HTTPException, Depends, Header, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+import json
 
 # Import our managers
 from auth_manager import AuthManager
@@ -25,7 +26,7 @@ app.add_middleware(
 auth_manager = AuthManager()
 game_manager = GameManager()
 
-# Models
+# Models (keep as before)
 class UserRegister(BaseModel):
     username: str
     email: str
@@ -65,7 +66,7 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
 # --- Health & Warmup Endpoints ---
 @app.get("/api/warmup")
 async def warmup():
-    """Warm up the server"""
+    """Warm up the server - FRONTEND COMPATIBLE"""
     try:
         # Test database connections
         auth_manager.get_user_by_username("test")
@@ -73,65 +74,95 @@ async def warmup():
         
         return {
             "status": "ready",
-            "auth": "connected",
-            "game": "connected",
-            "timestamp": datetime.now().isoformat()
+            "database": "connected",
+            "timestamp": datetime.now().isoformat(),
+            "message": "Server is warmed up and ready"
         }
     except Exception as e:
         return {
             "status": "warming",
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "message": f"Server is starting up: {str(e)}",
+            "database": "initializing",
+            "retry_in": 5
         }
 
 @app.get("/api/ping")
 async def ping():
+    """Simple ping - FRONTEND COMPATIBLE"""
     return {"status": "pong", "timestamp": datetime.now().isoformat()}
 
+@app.get("/api/status")
+async def server_status():
+    """Server status - FRONTEND COMPATIBLE"""
+    try:
+        online_users = auth_manager.get_online_users()
+        available_games = game_manager.get_available_games()
+        
+        return {
+            "online": True,
+            "status": "healthy",
+            "database": "connected",
+            "timestamp": datetime.now().isoformat(),
+            "online_users": len(online_users)
+        }
+    except Exception as e:
+        return {
+            "online": False,
+            "status": "starting",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
 @app.get("/api/health")
-async def health():
+async def health_check():
+    """Health check - FRONTEND COMPATIBLE"""
     try:
         online_users = auth_manager.get_online_users()
         available_games = game_manager.get_available_games()
         
         return {
             "status": "healthy",
-            "online_users": len(online_users),
-            "available_games": len(available_games),
+            "online": True,
+            "database": {"connected": True},
+            "connections": {"websocket": 0, "games": 0},
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
         return {
             "status": "unhealthy",
+            "online": False,
             "error": str(e),
             "timestamp": datetime.now().isoformat()
         }
 
-# --- Auth Endpoints ---
-@app.post("/api/auth/register")
+# --- Auth Endpoints (FRONTEND COMPATIBLE FORMAT) ---
+@app.post("/api/auth/register", response_model=Dict)
 async def register_user(user_data: UserRegister):
-    """Register a new user"""
+    """Register a new user - OLD FRONTEND FORMAT"""
     try:
         result = auth_manager.create_user(
             user_data.username,
             user_data.email,
             user_data.password
         )
+        
+        # Return OLD FRONTEND FORMAT
         return {
-            "success": True,
             "access_token": result["token"],
-            "token_type": "bearer",
+            "token_type": "bearer", 
             "user_id": result["id"],
             "username": result["username"]
         }
+        
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
-@app.post("/api/auth/login")
+@app.post("/api/auth/login", response_model=Dict)
 async def login_user(user_data: UserLogin):
-    """Login user"""
+    """Login user - OLD FRONTEND FORMAT"""
     result = auth_manager.authenticate_user(
         user_data.username,
         user_data.password
@@ -143,8 +174,8 @@ async def login_user(user_data: UserLogin):
             detail="Invalid username or password"
         )
     
+    # Return OLD FRONTEND FORMAT
     return {
-        "success": True,
         "access_token": result["token"],
         "token_type": "bearer",
         "user_id": result["id"],
@@ -153,7 +184,7 @@ async def login_user(user_data: UserLogin):
 
 @app.get("/api/auth/profile")
 async def get_profile(current_user: Optional[Dict] = Depends(get_current_user)):
-    """Get user profile"""
+    """Get user profile - OLD FRONTEND FORMAT"""
     if not current_user:
         raise HTTPException(status_code=401, detail="Not authenticated")
     
@@ -161,23 +192,26 @@ async def get_profile(current_user: Optional[Dict] = Depends(get_current_user)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    # Return OLD FRONTEND FORMAT
     return {
         "id": user["id"],
         "username": user["username"],
         "email": user["email"],
         "games_played": user["games_played"],
-        "games_won": user["games_won"]
+        "games_won": user["games_won"],
+        "online": bool(user["online"]),
+        "last_seen": user["last_seen"]
     }
 
 @app.get("/api/auth/online-users")
 async def get_online_users():
-    """Get online users"""
+    """Get online users - OLD FRONTEND FORMAT"""
     users = auth_manager.get_online_users()
     return {"online_users": users}
 
 @app.get("/api/auth/validate-token")
 async def validate_token(authorization: Optional[str] = Header(None)):
-    """Validate token"""
+    """Validate token - OLD FRONTEND FORMAT"""
     if not authorization or not authorization.startswith("Bearer "):
         return {"valid": False}
     
@@ -193,13 +227,13 @@ async def validate_token(authorization: Optional[str] = Header(None)):
         "username": user["username"]
     }
 
-# --- Game Endpoints ---
+# --- Game Endpoints (FRONTEND COMPATIBLE FORMAT) ---
 @app.post("/api/game/create")
 async def create_game(
     request: CreateGameRequest,
     current_user: Optional[Dict] = Depends(get_current_user)
 ):
-    """Create a new game"""
+    """Create a new game - OLD FRONTEND FORMAT"""
     # Get user ID (authenticated or guest)
     user_id = current_user["id"] if current_user else request.userId
     
@@ -210,13 +244,19 @@ async def create_game(
             user_id
         )
         
+        # Get the full game to return players
+        game = game_manager.get_game(result["game_id"])
+        
+        # Return OLD FRONTEND FORMAT
         return {
             "success": True,
             "gameId": result["game_id"],
             "roomCode": result["room_code"],
             "playerId": result["player_id"],
-            "players": request.players
+            "players": [{"name": p["name"], "is_computer": p["is_computer"]} for p in game["players"]],
+            "gameName": game["game_name"]
         }
+        
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -228,7 +268,7 @@ async def join_game(
     request: JoinGameRequest,
     current_user: Optional[Dict] = Depends(get_current_user)
 ):
-    """Join an existing game"""
+    """Join an existing game - OLD FRONTEND FORMAT"""
     user_id = current_user["id"] if current_user else request.userId
     
     try:
@@ -238,11 +278,23 @@ async def join_game(
             user_id
         )
         
+        # Get the full game
+        game = game_manager.get_game(result["game_id"])
+        
+        # Find the player in the game
+        player = next((p for p in game["players"] if p["id"] == result["player_id"]), None)
+        
+        if not player:
+            raise HTTPException(status_code=500, detail="Player not found in game")
+        
+        # Return OLD FRONTEND FORMAT
         return {
             "success": True,
             "gameId": result["game_id"],
-            "playerId": result["player_id"]
+            "playerId": result["player_id"],
+            "gameState": game  # Full game state for frontend
         }
+        
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -250,40 +302,47 @@ async def join_game(
 
 @app.get("/api/game/available")
 async def get_available_games():
-    """Get available games"""
+    """Get available games - OLD FRONTEND FORMAT"""
     games = game_manager.get_available_games()
     return {"available_games": games}
 
 @app.get("/api/game/{game_id}/state")
 async def get_game_state(game_id: str):
-    """Get game state"""
+    """Get game state - OLD FRONTEND FORMAT"""
     game = game_manager.get_game(game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     
+    # Return OLD FRONTEND FORMAT
     return {
         "success": True,
-        "gameState": game
+        "gameState": game,
+        "lastMove": game.get("last_move")
     }
 
 @app.get("/api/game/{game_id}/lobby")
 async def get_lobby_state(game_id: str):
-    """Get lobby state"""
+    """Get lobby state - OLD FRONTEND FORMAT"""
     game = game_manager.get_game(game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     
-    # Don't show cards in lobby
+    # Don't show cards in lobby (frontend expects empty hands in lobby)
+    lobby_players = []
     for player in game["players"]:
-        player["hand"] = []
-        player["spreads"] = []
+        player_copy = player.copy()
+        player_copy["hand"] = []  # Empty hand in lobby
+        player_copy["spreads"] = []  # Empty spreads in lobby
+        lobby_players.append(player_copy)
     
+    # Return OLD FRONTEND FORMAT
     return {
         "success": True,
-        "players": game["players"],
+        "players": lobby_players,
         "status": game["game_status"],
         "roomCode": game["room_code"],
         "gameName": game["game_name"],
+        "createdAt": game["created_at"],
         "maxPlayers": game["max_players"],
         "canStart": len(game["players"]) >= 2
     }
@@ -293,7 +352,7 @@ async def start_game(
     game_id: str,
     current_user: Optional[Dict] = Depends(get_current_user)
 ):
-    """Start a game"""
+    """Start a game - OLD FRONTEND FORMAT"""
     game = game_manager.get_game(game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
@@ -304,7 +363,19 @@ async def start_game(
     
     try:
         result = game_manager.start_game(game_id)
-        return result
+        
+        # Get updated game state
+        updated_game = game_manager.get_game(game_id)
+        
+        # Return OLD FRONTEND FORMAT
+        return {
+            "success": True,
+            "gameId": game_id,
+            "roomCode": game["room_code"],
+            "status": updated_game["game_status"],
+            "gameState": updated_game
+        }
+        
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -312,7 +383,7 @@ async def start_game(
 
 @app.get("/api/game/room/{room_code}/id")
 async def get_game_id_by_room(room_code: str):
-    """Get game ID from room code"""
+    """Get game ID from room code - OLD FRONTEND FORMAT"""
     game = game_manager.get_game_by_room_code(room_code)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
@@ -326,17 +397,67 @@ async def get_game_id_by_room(room_code: str):
 
 @app.get("/api/game/room/{room_code}/state")
 async def get_game_state_by_room(room_code: str):
-    """Get game state by room code"""
+    """Get game state by room code - OLD FRONTEND FORMAT"""
     game = game_manager.get_game_by_room_code(room_code)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     
     return {
         "success": True,
-        "gameState": game
+        "gameState": game,
+        "lastMove": game.get("last_move")
     }
 
-# --- WebSocket Endpoint ---
+@app.post("/api/game/{game_id}/move")
+async def make_move(
+    game_id: str,
+    request: MoveRequest,
+    current_user: Optional[Dict] = Depends(get_current_user)
+):
+    """Make a move - OLD FRONTEND FORMAT"""
+    game = game_manager.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    
+    # Find player
+    player_index = next((i for i, p in enumerate(game["players"]) if p["id"] == request.playerId), -1)
+    if player_index == -1:
+        raise HTTPException(status_code=404, detail="Player not found")
+    
+    # Verify it's the player's turn
+    if game["current_player_index"] != player_index:
+        raise HTTPException(status_code=400, detail="Not your turn")
+    
+    # Process move (simplified - you'll need to implement full move logic)
+    move_result = {
+        "playerId": request.playerId,
+        "playerName": game["players"][player_index]["name"],
+        "moveType": request.moveType,
+        "moveData": request.moveData,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    # Update last move
+    game["last_move"] = move_result
+    
+    # Save game
+    game_manager.save_game(game)
+    
+    # Return OLD FRONTEND FORMAT
+    return {
+        "success": True,
+        "gameState": game,
+        "lastMove": move_result
+    }
+
+@app.get("/api/game/user/{user_id}/active")
+async def get_user_active_game(user_id: str):
+    """Get user's active game - OLD FRONTEND FORMAT"""
+    # This would require adding a method to game_manager
+    # For now, return a placeholder
+    return {"hasActiveGame": False}
+
+# --- WebSocket Endpoint (Keep as before) ---
 active_connections = {}
 
 @app.websocket("/ws/game/{game_id}")
@@ -374,10 +495,14 @@ async def root():
         "status": "running",
         "version": "1.0.0",
         "endpoints": {
-            "auth": ["/api/auth/register", "/api/auth/login"],
-            "game": ["/api/game/create", "/api/game/{room_code}/join"],
-            "health": ["/api/health", "/api/ping", "/api/warmup"]
-        }
+            "docs": "/docs",
+            "openapi": "/openapi.json",
+            "health": "/api/health",
+            "warmup": "/api/warmup",
+            "status": "/api/status",
+            "ping": "/api/ping"
+        },
+        "timestamp": datetime.now().isoformat()
     }
 
 # Run the app
