@@ -14,6 +14,8 @@ from fastapi.encoders import jsonable_encoder
 import sqlite3
 import os
 from contextlib import contextmanager
+import time
+import threading
 
 # Security configuration
 SECRET_KEY = "your-secret-key-here-change-in-production"
@@ -116,6 +118,40 @@ def init_database():
         
         conn.commit()
 
+def init_database_with_retry(max_retries=5, delay=1):
+    """Initialize database with retry logic for concurrent startup"""
+    for attempt in range(max_retries):
+        try:
+            init_database()
+            print(f"✅ Database initialized successfully (attempt {attempt + 1})")
+            return True
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e) and attempt < max_retries - 1:
+                print(f"⚠️ Database locked, retrying in {delay} seconds...")
+                time.sleep(delay)
+            else:
+                print(f"❌ Failed to initialize database: {e}")
+                # Create a minimal database file to prevent startup failure
+                try:
+                    with open("tonk_game.db", "w") as f:
+                        f.write("")
+                    print("📁 Created empty database file")
+                except:
+                    pass
+                raise
+    return False
+
+def initialize_background():
+    """Initialize database in background thread"""
+    print("🚀 Starting background initialization...")
+    init_database_with_retry()
+    print("✅ Background initialization complete")
+
+# Start initialization in background
+init_thread = threading.Thread(target=initialize_background)
+init_thread.daemon = True
+init_thread.start()
+
 @contextmanager
 def get_db_connection():
     """Get a database connection with proper cleanup"""
@@ -126,8 +162,19 @@ def get_db_connection():
     finally:
         conn.close()
 
-# Initialize database on startup
-init_database()
+# --- Startup Event ---
+@app.on_event("startup")
+async def startup_event():
+    """FastAPI startup event"""
+    print("🔥 FastAPI starting up...")
+    # Warmup by doing a simple DB query
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            print("✅ Database warmed up")
+    except Exception as e:
+        print(f"⚠️ Startup warning: {e}")
 
 # --- Authentication Models ---
 class UserRegister(BaseModel):
@@ -539,6 +586,74 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     except JWTError:
         # Invalid token - treat as guest
         return None
+
+# --- SERVER WARMUP & STATUS ENDPOINTS ---
+@app.get("/api/warmup")
+async def warmup_server():
+    """Special endpoint to warm up the Render instance"""
+    start_time = time.time()
+    
+    try:
+        # Test database connection
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+        
+        # Test essential functionality
+        process_time = time.time() - start_time
+        
+        return {
+            "status": "ready",
+            "warmup_time": f"{process_time:.2f}s",
+            "timestamp": datetime.now().isoformat(),
+            "message": "Server is warmed up and ready",
+            "database": "connected",
+            "endpoints": {
+                "auth": "/api/auth/*",
+                "game": "/api/game/*",
+                "websocket": "/ws/game/{game_id}"
+            }
+        }
+    except Exception as e:
+        return {
+            "status": "warming",
+            "timestamp": datetime.now().isoformat(),
+            "message": f"Server is starting up: {str(e)}",
+            "database": "initializing" if "no such table" in str(e) else "error",
+            "retry_in": 5  # seconds
+        }
+
+@app.get("/api/ping")
+async def ping():
+    """Simple ping endpoint for health checks"""
+    return {"status": "pong", "timestamp": datetime.now().isoformat()}
+
+@app.get("/api/status")
+async def server_status():
+    """Get server status"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+            table_count = cursor.fetchone()[0]
+        
+        return {
+            "status": "healthy",
+            "uptime": "running",
+            "database": {
+                "tables": table_count,
+                "path": DATABASE_URL
+            },
+            "timestamp": datetime.now().isoformat(),
+            "version": "1.0.0"
+        }
+    except Exception as e:
+        return {
+            "status": "starting",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
 
 # --- Authentication Endpoints ---
 @app.post("/api/auth/register", response_model=Token)
@@ -1416,34 +1531,65 @@ async def get_game_state_by_room_code(room_code: str):
 
 @app.get("/")
 async def root():
-    return {"message": "Tonk Game API is running", "status": "ok", "docs": "/docs"}
+    """Root endpoint with server info"""
+    return {
+        "message": "Tonk Game API",
+        "status": "running",
+        "version": "1.0.0",
+        "endpoints": {
+            "docs": "/docs",
+            "openapi": "/openapi.json",
+            "health": "/api/health",
+            "warmup": "/api/warmup",
+            "status": "/api/status",
+            "ping": "/api/ping"
+        },
+        "timestamp": datetime.now().isoformat()
+    }
 
 @app.get("/api/health")
 async def health_check():
-    """Health check with database connection test"""
+    """Health check with detailed diagnostics"""
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
+            
+            # Check users table
             cursor.execute("SELECT COUNT(*) as user_count FROM users")
             user_count = cursor.fetchone()['user_count']
             
+            # Check games table
             cursor.execute("SELECT COUNT(*) as game_count FROM games")
             game_count = cursor.fetchone()['game_count']
             
+            # Check active connections
+            active_connections = sum(len(conns) for conns in connections.values())
+        
         return {
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
-            "database": "connected",
-            "users_count": user_count,
-            "games_count": game_count,
-            "connections_count": sum(len(conns) for conns in connections.values())
+            "database": {
+                "connected": True,
+                "users": user_count,
+                "games": game_count
+            },
+            "connections": {
+                "websocket": active_connections,
+                "games": len(connections)
+            },
+            "system": {
+                "python": "3.x",
+                "fastapi": "0.104.1",
+                "sqlite": "3.x"
+            }
         }
     except Exception as e:
         return {
             "status": "unhealthy",
             "timestamp": datetime.now().isoformat(),
-            "database": "error",
-            "error": str(e)
+            "database": "error" if "no such table" in str(e) else "disconnected",
+            "error": str(e),
+            "recovery": "Server is still starting up, try /api/warmup"
         }
 
 if __name__ == "__main__":
