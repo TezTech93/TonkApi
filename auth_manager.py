@@ -50,10 +50,22 @@ class AuthManager:
         return conn
     
     # Password helpers
+    # auth_manager.py - Update hash_password and verify_password methods
     def hash_password(self, password: str) -> str:
+        """Hash password with BCrypt - handles long passwords"""
+        # BCrypt has 72-byte limit, so we hash first if password is too long
+        if len(password.encode('utf-8')) > 72:
+            # Use SHA-256 as a pre-hash for long passwords
+            import hashlib
+            password = hashlib.sha256(password.encode('utf-8')).hexdigest()
         return pwd_context.hash(password)
-    
+
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
+        """Verify password - handles long passwords"""
+        # BCrypt has 72-byte limit
+        if len(plain_password.encode('utf-8')) > 72:
+            import hashlib
+            plain_password = hashlib.sha256(plain_password.encode('utf-8')).hexdigest()
         return pwd_context.verify(plain_password, hashed_password)
     
     def create_token(self, username: str) -> str:

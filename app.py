@@ -140,6 +140,7 @@ async def health_check():
 @app.post("/api/auth/register", response_model=Dict)
 async def register_user(user_data: UserRegister):
     """Register a new user - OLD FRONTEND FORMAT"""
+    auth_manager.init_db()
     try:
         result = auth_manager.create_user(
             user_data.username,
@@ -236,7 +237,7 @@ async def create_game(
     """Create a new game - OLD FRONTEND FORMAT"""
     # Get user ID (authenticated or guest)
     user_id = current_user["id"] if current_user else request.userId
-    
+    game_manager.init_db()
     try:
         result = game_manager.create_game(
             request.players,

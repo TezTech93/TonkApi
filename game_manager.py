@@ -351,59 +351,58 @@ class GameManager:
             "game_id": game_id
         }
     
-    # In game_manager.py, update save_game method:
     def save_game(self, game: Dict):
-      """Save game to database"""
-      conn = self.get_db_connection()
-      cursor = conn.cursor()
-      
-      # Update game
-      cursor.execute('''
-          UPDATE games SET
-              deck = ?, discard_pile = ?, under_card = ?,
-              current_player_index = ?, turn_phase = ?, table_spreads = ?,
-              turn_count = ?, game_status = ?, last_move = ?, settings = ?,
-              winner = ?, win_reason = ?
-          WHERE id = ?
-      ''', (
-          json.dumps(game.get("deck", [])), 
-          json.dumps(game.get("discard_pile", [])),
-          json.dumps(game.get("under_card")),
-          game.get("current_player_index", 0),
-          game.get("turn_phase", "waiting"),
-          json.dumps(game.get("table_spreads", [])),
-          game.get("turn_count", 0),
-          game.get("game_status", "lobby"),
-          json.dumps(game.get("last_move")),
-          json.dumps(game.get("settings", {})),
-          game.get("winner"),
-          game.get("win_reason"),
-          game["id"]
-      ))
-      
-      # Update players
-      for player in game.get("players", []):
-          cursor.execute('''
-              UPDATE game_players SET
-                  hand = ?, spreads = ?, has_dropped = ?, score = ?,
-                  last_move = ?, turns = ?, has_drawn_from_under = ?,
-                  is_online = ?
-              WHERE id = ?
-          ''', (
-              json.dumps(player.get("hand", [])),
-              json.dumps(player.get("spreads", [])),
-              player.get("has_dropped", False),
-              player.get("score", 0),
-              player.get("last_move"),
-              player.get("turns", 0),
-              player.get("has_drawn_from_under", False),
-              player.get("is_online", True),
-              player["id"]
-          ))
-      
-      conn.commit()
-      conn.close()
-      
+        """Save game to database"""
+        conn = self.get_db_connection()
+        cursor = conn.cursor()
+        
+        # Update game
+        cursor.execute('''
+            UPDATE games SET
+                deck = ?, discard_pile = ?, under_card = ?,
+                current_player_index = ?, turn_phase = ?, table_spreads = ?,
+                turn_count = ?, game_status = ?, last_move = ?, settings = ?,
+                winner = ?, win_reason = ?
+            WHERE id = ?
+        ''', (
+            json.dumps(game["deck"]), 
+            json.dumps(game["discard_pile"]),
+            json.dumps(game["under_card"]),
+            game["current_player_index"],
+            game["turn_phase"],
+            json.dumps(game["table_spreads"]),
+            game["turn_count"],
+            game["game_status"],
+            json.dumps(game["last_move"]),
+            json.dumps(game["settings"]),
+            game["winner"],
+            game["win_reason"],
+            game["id"]
+        ))
+        
+        # Update players
+        for player in game["players"]:
+            cursor.execute('''
+                UPDATE game_players SET
+                    hand = ?, spreads = ?, has_dropped = ?, score = ?,
+                    last_move = ?, turns = ?, has_drawn_from_under = ?,
+                    is_online = ?
+                WHERE id = ?
+            ''', (
+                json.dumps(player["hand"]),
+                json.dumps(player["spreads"]),
+                player.get("has_dropped", False),
+                player.get("score", 0),
+                player.get("last_move"),
+                player.get("turns", 0),
+                player.get("has_drawn_from_under", False),
+                player.get("is_online", True),
+                player["id"]
+            ))
+        
+        conn.commit()
+        conn.close()
+    
     def get_available_games(self) -> List[Dict]:
         """Get all available games"""
         conn = self.get_db_connection()
@@ -431,4 +430,4 @@ class GameManager:
             })
         
         conn.close()
-        return gam
+        return games
