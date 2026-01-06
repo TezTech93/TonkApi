@@ -1,39 +1,37 @@
-# auth_manager.py - SIMPLIFIED
+# auth_manager.py - USE BCRYPT DIRECTLY
 import uuid
-import hashlib
+import bcrypt  # ADD THIS IMPORT
 from datetime import datetime, timedelta
 from typing import Optional, Dict
-from passlib.context import CryptContext
 from jose import JWTError, jwt
-from database import db  # Import shared DB instance
+from database import db
 
 SECRET_KEY = "your-secret-key-change-in-production"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# REMOVE: pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 class AuthManager:
     def __init__(self):
-        # Database will auto-initialize via singleton
         pass
     
     def _ensure_db(self):
-        """Ensure database is ready before any operation"""
         db.ensure_tables_exist()
     
     def hash_password(self, password: str) -> str:
-        """Hash password with BCrypt"""
-        # Handle long passwords
-        if len(password.encode('utf-8')) > 72:
-            password = hashlib.sha256(password.encode('utf-8')).hexdigest()
-        return pwd_context.hash(password)
+        """Hash a password for storing - USING DIRECT BCRYPT"""
+        # Bcrypt can handle any length password - it hashes internally
+        salt = bcrypt.gensalt()
+        hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+        return hashed.decode('utf-8')
     
-    def verify_password(self, plain_password: str, hashed_password: str) -> bool:
-        """Verify password"""
-        if len(plain_password.encode('utf-8')) > 72:
-            plain_password = hashlib.sha256(plain_password.encode('utf-8')).hexdigest()
-        return pwd_context.verify(plain_password, hashed_password)
+    def verify_password(self, password: str, hashed_password: str) -> bool:
+        """Verify a stored password - USING DIRECT BCRYPT"""
+        try:
+            return bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8'))
+        except Exception:
+            return False
     
     def create_token(self, username: str) -> str:
         """Create JWT token"""
