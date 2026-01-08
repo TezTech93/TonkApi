@@ -197,6 +197,217 @@ async def warmup():
             "error": str(e)[:100],
             "timestamp": datetime.now().isoformat()
         }
+        
+# Add to app.py - MISSING ENDPOINTS
+
+@app.post("/api/game/{room_code}/join")
+async def join_game(room_code: str, request: JoinGameRequest):
+    """Join an existing game"""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Find game by room code
+        cursor.execute("SELECT id FROM games WHERE room_code = ?", (room_code,))
+        game_row = cursor.fetchone()
+        
+        if not game_row:
+            conn.close()
+            raise HTTPException(404, "Game not found")
+        
+        game_id = game_row['id']
+        
+        # Get game to check status
+        cursor.execute("SELECT game_status, max_players FROM games WHERE id = ?", (game_id,))
+        game_info = cursor.fetchone()
+        
+        if game_info['game_status'] != 'lobby':
+            conn.close()
+            raise HTTPException(400, "Game already started")
+        
+        # Count current players
+        cursor.execute("SELECT COUNT(*) as count FROM game_players WHERE game_id = ?", (game_id,))
+        player_count = cursor.fetchone()['count']
+        
+        if player_count >= game_info['max_players']:
+            conn.close()
+            raise HTTPException(400, "Game is full")
+        
+        # Create player
+        player_id = str(uuid.uuid4())
+        position = player_count
+        
+        cursor.execute('''
+            INSERT INTO game_players (id, game_id, user_id, name, is_computer, position)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (player_id, game_id, request.userId, request.playerName, False, position))
+        
+        conn.commit()
+        conn.close()
+        
+        return {
+            "success": True,
+            "gameId": game_id,
+            "playerId": player_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Failed to join game: {str(e)}")
+
+@app.get("/api/game/available")
+async def get_available_games():
+    """Get available games"""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT g.id, g.room_code, g.game_name, g.creator_id, g.created_at,
+                   COUNT(p.id) as player_count, g.max_players
+            FROM games g
+            LEFT JOIN game_players p ON g.id = p.game_id
+            WHERE g.game_status = 'lobby'
+            GROUP BY g.id
+            HAVING player_count < g.max_players
+        ''')
+        
+        games = []
+        for row in cursor.fetchall():
+            games.append({
+                "gameId": row['id'],
+                "roomCode": row['room_code'],
+                "gameName": row['game_name'],
+                "currentPlayers": row['player_count'],
+                "maxPlayers": row['max_players'],
+                "creator": row['creator_id'],
+                "createdAt": row['created_at']
+            })
+        
+        conn.close()
+        return {"available_games": games}
+        
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.get("/api/game/user/{user_id}/active")
+async def get_user_active_game(user_id: str):
+    """Get user's active game"""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT g.id, g.room_code, g.game_status 
+            FROM games g
+            JOIN game_players p ON g.id = p.game_id
+            WHERE p.user_id = ? AND g.game_status IN ('lobby', 'playing')
+            LIMIT 1
+        ''', (user_id,))
+        
+        game_row = cursor.fetchone()
+        conn.close()
+        
+        if game_row:
+            return {
+                "hasActiveGame": True,
+                "gameId": game_row["id"],
+                "roomCode": game_row["room_code"],
+                "gameStatus": game_row["game_status"]
+            }
+        
+        return {"hasActiveGame": False}
+        
+    except Exception as e:
+        return {"hasActiveGame": False}
+
+@app.get("/api/auth/profile")
+async def get_profile(authorization: Optional[str] = Header(None)):
+    """Get user profile"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Not authenticated")
+    
+    token = authorization.split(" ")[1]
+    payload = decode_token(token)
+    
+    if not payload:
+        raise HTTPException(401, "Invalid token")
+    
+    username = payload.get("sub")
+    if not username:
+        raise HTTPException(401, "Invalid token")
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+    user = cursor.fetchone()
+    conn.close()
+    
+    if not user:
+        raise HTTPException(404, "User not found")
+    
+    return {
+        "id": user['id'],
+        "username": user['username'],
+        "email": user['email'],
+        "games_played": user['games_played'],
+        "games_won": user['games_won'],
+        "online": bool(user['online']),
+        "last_seen": user['last_seen']
+    }
+
+@app.get("/api/health")
+async def health_check():
+    """Health check"""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as user_count FROM users")
+        user_count = cursor.fetchone()['user_count']
+        cursor.execute("SELECT COUNT(*) as game_count FROM games")
+        game_count = cursor.fetchone()['game_count']
+        conn.close()
+        
+        return {
+            "status": "healthy",
+            "users": user_count,
+            "games": game_count,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+@app.get("/api/status")
+async def server_status():
+    """Server status"""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as table_count FROM sqlite_master WHERE type='table'")
+        table_count = cursor.fetchone()['table_count']
+        conn.close()
+        
+        return {
+            "online": True,
+            "status": "healthy",
+            "database": {
+                "tables": table_count,
+                "connected": True
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "online": False,
+            "status": "starting",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
 
 @app.get("/")
 async def root():
