@@ -9,6 +9,8 @@ import traceback
 import uuid
 import sqlite3
 import random
+import bcrypt
+import jwt
 
 app = FastAPI(title="Tonk Game API")
 
@@ -123,10 +125,6 @@ def get_db():
     conn = sqlite3.connect("tonk_game.db")
     conn.row_factory = sqlite3.Row
     return conn
-
-# ============ HELPER FUNCTIONS ============
-import bcrypt
-import jwt
 
 SECRET_KEY = "your-secret-key-change-in-production"
 ALGORITHM = "HS256"
