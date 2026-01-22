@@ -284,21 +284,29 @@ async def status():
 # ============ AUTH ENDPOINTS ============
 @app.post("/api/auth/register")
 async def register_user(user_data: UserRegister):
-    """Register a new user"""
+    """Register a new user - FIXED VERSION"""
+    print(f"📝 Register user attempt: {user_data.username}")
+    
+    conn = None
     try:
+        # Validate input
+        if not user_data.username or not user_data.email or not user_data.password:
+            raise HTTPException(400, "Username, email, and password are required")
+        
+        if len(user_data.password) < 3:
+            raise HTTPException(400, "Password must be at least 3 characters")
+        
         conn = get_db()
         cursor = conn.cursor()
         
-        # Check if username exists
+        # Check username
         cursor.execute("SELECT id FROM users WHERE username = ?", (user_data.username,))
         if cursor.fetchone():
-            conn.close()
             raise HTTPException(400, "Username already exists")
         
-        # Check if email exists
+        # Check email
         cursor.execute("SELECT id FROM users WHERE email = ?", (user_data.email,))
         if cursor.fetchone():
-            conn.close()
             raise HTTPException(400, "Email already exists")
         
         # Create user
@@ -316,9 +324,7 @@ async def register_user(user_data: UserRegister):
         # Create token
         token = create_token(user_data.username, user_id)
         
-        conn.close()
-        
-        return {
+        response_data = {
             "access_token": token,
             "token_type": "bearer",
             "user_id": user_id,
@@ -326,11 +332,20 @@ async def register_user(user_data: UserRegister):
             "message": "Registration successful"
         }
         
-    except HTTPException:
-        raise
+        print(f"✅ User registered: {user_data.username}")
+        return response_data
+        
+    except HTTPException as he:
+        print(f"❌ HTTP Exception in register: {he.detail}")
+        raise he
     except Exception as e:
-        print(f"Registration error: {traceback.format_exc()}")
+        print(f"❌ Unexpected error in register: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
         raise HTTPException(500, f"Registration failed: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
 
 @app.post("/api/auth/login")
 async def login_user(user_data: UserLogin):
