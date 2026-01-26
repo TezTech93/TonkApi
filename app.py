@@ -1,5 +1,5 @@
-# COMPLETE FIXED VERSION FOR RENDER.COM
-from fastapi import FastAPI, HTTPException, Header
+# COMPLETE app.py - ALL ENDPOINTS INCLUDED
+from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict
@@ -13,7 +13,7 @@ import bcrypt
 import jwt
 import os
 
-app = FastAPI(title="Tonk Game API - Fixed")
+app = FastAPI(title="Tonk Game API - Complete Version")
 
 # CORS
 app.add_middleware(
@@ -52,16 +52,19 @@ class MoveRequest(BaseModel):
     moveType: str
     moveData: Dict
 
+class PlayerReadyRequest(BaseModel):
+    is_ready: bool = True
+
 # ============ DATABASE SETUP ============
 def init_db():
-    """Initialize database - DO NOT DROP TABLES on every startup"""
-    print("🔄 Initializing database for Render.com...")
+    """Initialize database"""
+    print("🔄 Initializing database...")
     
     try:
         conn = sqlite3.connect("tonk_game.db")
         cursor = conn.cursor()
         
-        # Users table - CREATE IF NOT EXISTS
+        # Users table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
@@ -76,7 +79,7 @@ def init_db():
         )
         ''')
         
-        # Games table - CREATE IF NOT EXISTS
+        # Games table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS games (
             id TEXT PRIMARY KEY,
@@ -96,11 +99,12 @@ def init_db():
             winner TEXT,
             win_reason TEXT,
             creator_id TEXT,
-            max_players INTEGER DEFAULT 4
+            max_players INTEGER DEFAULT 4,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
         
-        # Players table - CREATE IF NOT EXISTS
+        # Players table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS game_players (
             id TEXT PRIMARY KEY,
@@ -116,24 +120,23 @@ def init_db():
             turns INTEGER DEFAULT 0,
             has_drawn_from_under BOOLEAN DEFAULT 0,
             is_online BOOLEAN DEFAULT 1,
-            position INTEGER
+            position INTEGER,
+            is_ready BOOLEAN DEFAULT 1
         )
         ''')
         
         conn.commit()
         conn.close()
-        print("✅ Database initialized successfully on Render.com")
+        print("✅ Database initialized successfully")
         
     except Exception as e:
         print(f"❌ Database initialization failed: {e}")
-        # Try to create just the file
         open("tonk_game.db", "a").close()
         print("📁 Created empty database file")
 
-# Initialize on startup
 @app.on_event("startup")
 def startup():
-    print("🚀 Tonk API starting on Render.com...")
+    print("🚀 Tonk API starting...")
     init_db()
     print("✅ Server ready")
 
@@ -145,7 +148,6 @@ def get_db():
         return conn
     except Exception as e:
         print(f"❌ Database connection error: {e}")
-        # Try to reinitialize
         init_db()
         conn = sqlite3.connect("tonk_game.db")
         conn.row_factory = sqlite3.Row
@@ -189,7 +191,7 @@ def create_deck():
     for suit in suits:
         for rank in ranks:
             value = 10 if rank in ["J", "Q", "K"] else 1 if rank == "A" else int(rank)
-            suit_symbol = {"hearts": "H", "diamonds": "D", "clubs": "C", "spades": "S"}.get(suit, "")
+            suit_symbol = {"hearts": "♥", "diamonds": "♦", "clubs": "♣", "spades": "♠"}.get(suit, "")
             
             deck.append({
                 "id": str(uuid.uuid4()),
@@ -204,25 +206,18 @@ def create_deck():
     random.shuffle(deck)
     return deck
 
-def get_current_player_id(game):
-    """Get the ID of the current player"""
-    players = json.loads(game["players"]) if isinstance(game["players"], str) else game["players"]
-    if players and game["current_player_index"] < len(players):
-        return players[game["current_player_index"]]["id"]
-    return None
-
-def get_player_by_id(game, player_id):
-    """Get player by ID"""
-    players = json.loads(game["players"]) if isinstance(game["players"], str) else game["players"]
-    for player in players:
-        if player["id"] == player_id:
-            return player
-    return None
+def safe_json_parse(value, default):
+    """Safely parse JSON with error handling"""
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except:
+        return default
 
 # ============ HEALTH ENDPOINTS ============
 @app.get("/api/ping")
 async def ping():
-    """Simple health check"""
     return {
         "status": "pong",
         "timestamp": datetime.now().isoformat(),
@@ -232,16 +227,12 @@ async def ping():
 
 @app.get("/api/warmup")
 async def warmup():
-    """Warm up server and check database"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = cursor.fetchall()
-        
         conn.close()
-        
         return {
             "status": "ready",
             "database": "connected",
@@ -258,19 +249,14 @@ async def warmup():
 
 @app.get("/api/status")
 async def status():
-    """Server status"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
         cursor.execute("SELECT COUNT(*) FROM users")
         user_count = cursor.fetchone()[0]
-        
         cursor.execute("SELECT COUNT(*) FROM games")
         game_count = cursor.fetchone()[0]
-        
         conn.close()
-        
         return {
             "online": True,
             "status": "running",
@@ -291,10 +277,6 @@ async def status():
 # ============ AUTH ENDPOINTS ============
 @app.post("/api/auth/register")
 async def register_user(user_data: UserRegister):
-    """Register a new user"""
-    print(f"📝 Register user attempt: {user_data.username}")
-    
-    conn = None
     try:
         if not user_data.username or not user_data.email or not user_data.password:
             raise HTTPException(400, "Username, email, and password are required")
@@ -304,7 +286,6 @@ async def register_user(user_data: UserRegister):
         
         conn = get_db()
         cursor = conn.cursor()
-        
         cursor.execute("SELECT id FROM users WHERE username = ?", (user_data.username,))
         if cursor.fetchone():
             raise HTTPException(400, "Username already exists")
@@ -323,10 +304,10 @@ async def register_user(user_data: UserRegister):
         ''', (user_id, user_data.username, user_data.email, hashed_password, created_at, 1, created_at))
         
         conn.commit()
-        
         token = create_token(user_data.username, user_id)
+        conn.close()
         
-        response_data = {
+        return {
             "access_token": token,
             "token_type": "bearer",
             "user_id": user_id,
@@ -334,26 +315,16 @@ async def register_user(user_data: UserRegister):
             "message": "Registration successful"
         }
         
-        print(f"✅ User registered: {user_data.username}")
-        return response_data
-        
     except HTTPException as he:
-        print(f"❌ HTTP Exception in register: {he.detail}")
         raise he
     except Exception as e:
-        print(f"❌ Unexpected error in register: {str(e)}")
         raise HTTPException(500, f"Registration failed: {str(e)}")
-    finally:
-        if conn:
-            conn.close()
 
 @app.post("/api/auth/login")
 async def login_user(user_data: UserLogin):
-    """Login user"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
         cursor.execute("SELECT * FROM users WHERE username = ?", (user_data.username,))
         user = cursor.fetchone()
         
@@ -370,9 +341,7 @@ async def login_user(user_data: UserLogin):
             (datetime.now().isoformat(), user['id'])
         )
         conn.commit()
-        
         token = create_token(user_data.username, user['id'])
-        
         conn.close()
         
         return {
@@ -386,12 +355,10 @@ async def login_user(user_data: UserLogin):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Login error: {traceback.format_exc()}")
         raise HTTPException(500, f"Login failed: {str(e)}")
 
 @app.get("/api/auth/validate-token")
 async def validate_token(authorization: str = Header(None)):
-    """Validate JWT token"""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "No token provided")
     
@@ -410,46 +377,36 @@ async def validate_token(authorization: str = Header(None)):
 # ============ GAME ENDPOINTS ============
 @app.post("/api/game/create")
 async def create_game(request: CreateGameRequest):
-    """Create a new game"""
     try:
         conn = get_db()
         cursor = conn.cursor()
         
         game_id = str(uuid.uuid4())
         room_code = ''.join(random.choices('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', k=6))
-        
         deck = create_deck()
         
         cursor.execute('''
-            INSERT INTO games (id, room_code, game_name, deck, creator_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (game_id, room_code, request.game_name, json.dumps(deck), request.userId, datetime.now().isoformat()))
+            INSERT INTO games (id, room_code, game_name, deck, creator_id, created_at, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (game_id, room_code, request.game_name, json.dumps(deck), request.userId, datetime.now().isoformat(), datetime.now().isoformat()))
         
         first_player_id = None
         for i, player_data in enumerate(request.players):
             player_id = str(uuid.uuid4())
             player_user_id = request.userId if i == 0 else None
-            
             is_computer = player_data.get("isComputer", False) or player_data.get("is_computer", False)
             
             cursor.execute('''
                 INSERT INTO game_players (id, game_id, user_id, name, is_computer, position)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (
-                player_id, game_id, player_user_id, 
-                player_data["name"], 
-                1 if is_computer else 0,
-                i
-            ))
+            ''', (player_id, game_id, player_user_id, player_data["name"], 1 if is_computer else 0, i))
             
             if i == 0:
                 first_player_id = player_id
         
         conn.commit()
-        
         cursor.execute("SELECT * FROM games WHERE id = ?", (game_id,))
         game = dict(cursor.fetchone())
-        
         cursor.execute("SELECT * FROM game_players WHERE game_id = ? ORDER BY position", (game_id,))
         players = cursor.fetchall()
         
@@ -479,11 +436,9 @@ async def create_game(request: CreateGameRequest):
 
 @app.post("/api/game/{room_code}/join")
 async def join_game(room_code: str, request: JoinGameRequest):
-    """Join an existing game"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
         cursor.execute("SELECT id, game_status, max_players FROM games WHERE room_code = ?", (room_code.upper(),))
         game_row = cursor.fetchone()
         
@@ -492,7 +447,6 @@ async def join_game(room_code: str, request: JoinGameRequest):
             raise HTTPException(404, f"Game not found with code: {room_code}")
         
         game_id = game_row['id']
-        
         if game_row['game_status'] != 'lobby':
             conn.close()
             raise HTTPException(400, "Game has already started")
@@ -513,43 +467,31 @@ async def join_game(room_code: str, request: JoinGameRequest):
         position = player_count
         
         cursor.execute('''
-            INSERT INTO game_players (id, game_id, user_id, name, is_computer, position)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (player_id, game_id, request.userId, request.playerName, 0, position))
-        
+            INSERT INTO game_players (id, game_id, user_id, name, is_computer, position, is_online)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (player_id, game_id, request.userId, request.playerName, 0, position, 1))
+        cursor.execute("UPDATE games SET last_updated = ? WHERE id = ?", (datetime.now().isoformat(), game_id))
         conn.commit()
         
         cursor.execute("SELECT * FROM games WHERE id = ?", (game_id,))
         game = dict(cursor.fetchone())
-        
         cursor.execute("SELECT * FROM game_players WHERE game_id = ? ORDER BY position", (game_id,))
         players = cursor.fetchall()
         
-        if game["deck"]:
-            game["deck"] = json.loads(game["deck"])
-        else:
-            game["deck"] = []
-            
-        if game["discard_pile"]:
-            game["discard_pile"] = json.loads(game["discard_pile"])
-        else:
-            game["discard_pile"] = []
-            
-        if game["under_card"]:
-            game["under_card"] = json.loads(game["under_card"])
-        else:
-            game["under_card"] = None
+        game["deck"] = safe_json_parse(game["deck"], [])
+        game["discard_pile"] = safe_json_parse(game["discard_pile"], [])
+        game["under_card"] = safe_json_parse(game["under_card"], None)
         
         game_players = []
         for player in players:
             player_dict = dict(player)
-            player_dict["hand"] = json.loads(player_dict["hand"]) if player_dict["hand"] else []
-            player_dict["spreads"] = json.loads(player_dict["spreads"]) if player_dict["spreads"] else []
+            player_dict["hand"] = safe_json_parse(player_dict["hand"], [])
+            player_dict["spreads"] = safe_json_parse(player_dict["spreads"], [])
             player_dict["is_computer"] = bool(player_dict["is_computer"])
+            player_dict["is_online"] = bool(player_dict.get("is_online", 1))
             game_players.append(player_dict)
         
         game["players"] = game_players
-        
         conn.close()
         
         return {
@@ -568,11 +510,9 @@ async def join_game(room_code: str, request: JoinGameRequest):
 
 @app.post("/api/game/{game_id}/start")
 async def start_game(game_id: str):
-    """Start a game with AI support"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
         cursor.execute("SELECT * FROM games WHERE id = ?", (game_id,))
         game_row = cursor.fetchone()
         
@@ -592,7 +532,6 @@ async def start_game(game_id: str):
             raise HTTPException(400, "Need at least 2 players to start")
         
         deck = create_deck()
-        
         player_hands = {}
         for player in players:
             hand = []
@@ -630,18 +569,18 @@ async def start_game(game_id: str):
                 deck = ?, discard_pile = ?, under_card = ?,
                 game_status = 'playing', turn_phase = 'draw',
                 turn_count = 1, current_player_index = 0,
-                last_move = ?
+                last_move = ?, last_updated = ?
             WHERE id = ?
         ''', (
             json.dumps(deck),
             json.dumps(discard_pile),
             json.dumps(under_card),
             json.dumps(last_move),
+            datetime.now().isoformat(),
             game_id
         ))
         
         conn.commit()
-        
         cursor.execute("SELECT * FROM games WHERE id = ?", (game_id,))
         updated_game = dict(cursor.fetchone())
         
@@ -654,19 +593,13 @@ async def start_game(game_id: str):
         for player in players:
             player_dict = dict(player)
             player_dict["hand"] = player_hands.get(player['id'], [])
-            player_dict["spreads"] = json.loads(player_dict["spreads"]) if player_dict["spreads"] else []
+            player_dict["spreads"] = safe_json_parse(player_dict["spreads"], [])
             player_dict["is_computer"] = bool(player_dict["is_computer"])
+            player_dict["is_online"] = bool(player_dict.get("is_online", 1))
             updated_players.append(player_dict)
         
         updated_game["players"] = updated_players
-        
         conn.close()
-        
-        # Check if first player is AI and trigger AI move if needed
-        first_player = updated_players[0] if updated_players else None
-        if first_player and first_player.get("is_computer"):
-            print(f"🤖 First player is AI ({first_player['name']}), should trigger AI move")
-            # Note: Frontend should handle this via polling
         
         return {
             "success": True,
@@ -683,14 +616,242 @@ async def start_game(game_id: str):
         print(f"Start game error: {traceback.format_exc()}")
         raise HTTPException(500, f"Failed to start game: {str(e)}")
 
-# ============ COMPLETE MOVE PROCESSING ============
-@app.post("/api/game/{game_id}/move")
-async def make_move(game_id: str, request: MoveRequest):
-    """Process a game move with full game logic"""
+# ============ LOBBY MANAGEMENT ENDPOINTS ============
+@app.get("/api/game/{game_id}/lobby")
+async def get_lobby_state(game_id: str):
     try:
         conn = get_db()
         cursor = conn.cursor()
+        cursor.execute("SELECT id, room_code, game_name, game_status, max_players, creator_id FROM games WHERE id = ?", (game_id,))
+        game_row = cursor.fetchone()
         
+        if not game_row:
+            conn.close()
+            raise HTTPException(404, "Game not found")
+        
+        cursor.execute("SELECT id, name, is_computer, user_id, position, is_online FROM game_players WHERE game_id = ? ORDER BY position", (game_id,))
+        players = cursor.fetchall()
+        
+        game_dict = dict(game_row)
+        lobby_players = []
+        for player in players:
+            player_dict = dict(player)
+            player_dict["is_computer"] = bool(player_dict["is_computer"])
+            player_dict["is_online"] = bool(player_dict.get("is_online", 1))
+            player_dict["hand"] = []
+            player_dict["spreads"] = []
+            lobby_players.append(player_dict)
+        
+        conn.close()
+        creator_in_game = any(p.get("user_id") == game_dict["creator_id"] for p in lobby_players)
+        can_start = len(lobby_players) >= 2 and creator_in_game
+        
+        return {
+            "success": True,
+            "gameState": {
+                "id": game_dict["id"],
+                "room_code": game_dict["room_code"],
+                "game_name": game_dict["game_name"],
+                "game_status": game_dict["game_status"],
+                "max_players": game_dict["max_players"],
+                "players": lobby_players,
+            },
+            "status": game_dict["game_status"],
+            "roomCode": game_dict["room_code"],
+            "gameName": game_dict["game_name"],
+            "players": lobby_players,
+            "canStart": can_start,
+            "playerCount": len(lobby_players),
+        }
+        
+    except Exception as e:
+        print(f"Get lobby state error: {traceback.format_exc()}")
+        raise HTTPException(500, f"Failed to get lobby state: {str(e)}")
+
+@app.get("/api/game/{game_id}/lobby/updates")
+async def get_lobby_updates(game_id: str, last_update: Optional[str] = None):
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT game_status, last_updated FROM games WHERE id = ?", (game_id,))
+        game_row = cursor.fetchone()
+        
+        if not game_row:
+            conn.close()
+            raise HTTPException(404, "Game not found")
+        
+        if last_update and game_row["last_updated"]:
+            try:
+                last_update_dt = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
+                game_update_dt = datetime.fromisoformat(game_row["last_updated"].replace('Z', '+00:00'))
+                if game_update_dt <= last_update_dt:
+                    conn.close()
+                    return {
+                        "success": True,
+                        "game_id": game_id,
+                        "has_updates": False,
+                        "game_status": game_row["game_status"],
+                        "timestamp": datetime.now().isoformat()
+                    }
+            except:
+                pass
+        
+        cursor.execute("SELECT COUNT(*) as player_count FROM game_players WHERE game_id = ?", (game_id,))
+        player_count = cursor.fetchone()["player_count"]
+        cursor.execute("SELECT name, is_computer, position, is_online FROM game_players WHERE game_id = ? ORDER BY position", (game_id,))
+        players = cursor.fetchall()
+        
+        player_names = []
+        for player in players:
+            player_dict = dict(player)
+            player_dict["is_computer"] = bool(player_dict["is_computer"])
+            player_dict["is_online"] = bool(player_dict.get("is_online", 1))
+            player_names.append({
+                "name": player_dict["name"],
+                "is_computer": player_dict["is_computer"],
+                "position": player_dict["position"],
+                "is_online": player_dict["is_online"]
+            })
+        
+        conn.close()
+        return {
+            "success": True,
+            "game_id": game_id,
+            "has_updates": True,
+            "game_status": game_row["game_status"],
+            "player_count": player_count,
+            "players": player_names,
+            "can_start": player_count >= 2,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        print(f"Lobby updates error: {traceback.format_exc()}")
+        raise HTTPException(500, f"Failed to get lobby updates: {str(e)}")
+
+@app.post("/api/game/{game_id}/player/{player_id}/ready")
+async def set_player_ready(game_id: str, player_id: str, request: PlayerReadyRequest):
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT game_status FROM games WHERE id = ?", (game_id,))
+        game_row = cursor.fetchone()
+        
+        if not game_row:
+            conn.close()
+            raise HTTPException(404, "Game not found")
+        
+        if game_row["game_status"] != "lobby":
+            conn.close()
+            raise HTTPException(400, "Game has already started")
+        
+        cursor.execute("SELECT id FROM game_players WHERE id = ? AND game_id = ?", (player_id, game_id))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(404, "Player not found in this game")
+        
+        cursor.execute("UPDATE game_players SET is_ready = ?, is_online = ? WHERE id = ?", (1 if request.is_ready else 0, 1, player_id))
+        cursor.execute("UPDATE games SET last_updated = ? WHERE id = ?", (datetime.now().isoformat(), game_id))
+        conn.commit()
+        conn.close()
+        
+        return {
+            "success": True,
+            "message": f"Player marked as {'ready' if request.is_ready else 'not ready'}",
+            "player_id": player_id,
+            "is_ready": request.is_ready
+        }
+        
+    except Exception as e:
+        print(f"Set player ready error: {traceback.format_exc()}")
+        raise HTTPException(500, f"Failed to set player ready: {str(e)}")
+
+@app.get("/api/game/{game_id}/player/{player_id}/check")
+async def check_player_in_game(game_id: str, player_id: str):
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT gp.*, g.room_code, g.game_name, g.game_status FROM game_players gp JOIN games g ON gp.game_id = g.id WHERE gp.id = ? AND gp.game_id = ?", (player_id, game_id))
+        player_row = cursor.fetchone()
+        
+        if not player_row:
+            conn.close()
+            return {
+                "success": False,
+                "is_in_game": False,
+                "message": "Player not found in game"
+            }
+        
+        player_dict = dict(player_row)
+        conn.close()
+        
+        return {
+            "success": True,
+            "is_in_game": True,
+            "player": {
+                "id": player_dict["id"],
+                "name": player_dict["name"],
+                "position": player_dict["position"],
+                "is_computer": bool(player_dict["is_computer"]),
+                "is_online": bool(player_dict.get("is_online", 1))
+            },
+            "game": {
+                "id": game_id,
+                "room_code": player_dict["room_code"],
+                "game_name": player_dict["game_name"],
+                "game_status": player_dict["game_status"]
+            }
+        }
+        
+    except Exception as e:
+        print(f"Check player in game error: {traceback.format_exc()}")
+        return {
+            "success": False,
+            "is_in_game": False,
+            "error": str(e)
+        }
+
+@app.post("/api/game/{game_id}/reconnect")
+async def reconnect_to_game(game_id: str, player_id: str = Header(None, alias="X-Player-ID")):
+    try:
+        if not player_id:
+            raise HTTPException(400, "Player ID is required")
+        
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT game_status FROM games WHERE id = ?", (game_id,))
+        game_row = cursor.fetchone()
+        
+        if not game_row:
+            conn.close()
+            raise HTTPException(404, "Game not found")
+        
+        cursor.execute("SELECT * FROM game_players WHERE id = ? AND game_id = ?", (player_id, game_id))
+        player_row = cursor.fetchone()
+        
+        if not player_row:
+            conn.close()
+            raise HTTPException(404, "Player not found in this game")
+        
+        cursor.execute("UPDATE game_players SET is_online = 1 WHERE id = ?", (player_id,))
+        cursor.execute("UPDATE games SET last_updated = ? WHERE id = ?", (datetime.now().isoformat(), game_id))
+        conn.commit()
+        
+        if game_row["game_status"] == "playing":
+            return await get_game_state(game_id)
+        else:
+            return await get_lobby_state(game_id)
+        
+    except Exception as e:
+        print(f"Reconnect error: {traceback.format_exc()}")
+        raise HTTPException(500, f"Failed to reconnect: {str(e)}")
+
+# ============ GAME MOVE PROCESSING ============
+@app.post("/api/game/{game_id}/move")
+async def make_move(game_id: str, request: MoveRequest):
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
         cursor.execute("SELECT * FROM games WHERE id = ?", (game_id,))
         game_row = cursor.fetchone()
         
@@ -712,43 +873,38 @@ async def make_move(game_id: str, request: MoveRequest):
         game = dict(game_row)
         player = dict(player_row)
         
-        # Parse JSON fields
-        game["deck"] = json.loads(game["deck"]) if game["deck"] else []
-        game["discard_pile"] = json.loads(game["discard_pile"]) if game["discard_pile"] else []
-        game["under_card"] = json.loads(game["under_card"]) if game["under_card"] else None
-        game["table_spreads"] = json.loads(game["table_spreads"]) if game["table_spreads"] else []
+        game["deck"] = safe_json_parse(game["deck"], [])
+        game["discard_pile"] = safe_json_parse(game["discard_pile"], [])
+        game["under_card"] = safe_json_parse(game["under_card"], None)
+        game["table_spreads"] = safe_json_parse(game["table_spreads"], [])
         
-        player["hand"] = json.loads(player["hand"]) if player["hand"] else []
-        player["spreads"] = json.loads(player["spreads"]) if player["spreads"] else []
+        player["hand"] = safe_json_parse(player["hand"], [])
+        player["spreads"] = safe_json_parse(player["spreads"], [])
         
-        # Get players to check turn order
         cursor.execute("SELECT * FROM game_players WHERE game_id = ? ORDER BY position", (game_id,))
         all_players = cursor.fetchall()
         players_list = []
         for p in all_players:
             p_dict = dict(p)
-            p_dict["hand"] = json.loads(p_dict["hand"]) if p_dict["hand"] else []
-            p_dict["spreads"] = json.loads(p_dict["spreads"]) if p_dict["spreads"] else []
+            p_dict["hand"] = safe_json_parse(p_dict["hand"], [])
+            p_dict["spreads"] = safe_json_parse(p_dict["spreads"], [])
             p_dict["is_computer"] = bool(p_dict["is_computer"])
             players_list.append(p_dict)
         
         current_player_index = game["current_player_index"]
         
-        # Verify it's the player's turn
         if current_player_index >= len(players_list) or players_list[current_player_index]["id"] != request.playerId:
             conn.close()
             raise HTTPException(400, "Not your turn")
         
-        # Process move based on type
         move_result = process_game_move(game, player, request.moveType, request.moveData)
         
-        # Update game state
         cursor.execute('''
             UPDATE games SET
                 deck = ?, discard_pile = ?, under_card = ?,
                 current_player_index = ?, turn_phase = ?,
                 turn_count = ?, last_move = ?, table_spreads = ?,
-                game_status = ?
+                game_status = ?, last_updated = ?
             WHERE id = ?
         ''', (
             json.dumps(game["deck"]),
@@ -760,53 +916,43 @@ async def make_move(game_id: str, request: MoveRequest):
             json.dumps(move_result.get("last_move", {})),
             json.dumps(game["table_spreads"]),
             move_result.get("game_status", game["game_status"]),
+            datetime.now().isoformat(),
             game_id
         ))
         
-        # Update player
         cursor.execute('''
             UPDATE game_players SET
-                hand = ?, spreads = ?, has_dropped = ?,
-                score = ?, last_move = ?, turns = ?,
-                has_drawn_from_under = ?
+                hand = ?, spreads = ?, last_move = ?, turns = ?
             WHERE id = ?
         ''', (
             json.dumps(player["hand"]),
             json.dumps(player["spreads"]),
-            player.get("has_dropped", 0),
-            player.get("score", 0),
             json.dumps(request.moveData),
             player.get("turns", 0) + 1,
-            player.get("has_drawn_from_under", 0),
             request.playerId
         ))
         
         conn.commit()
-        
-        # Get updated game state
         cursor.execute("SELECT * FROM games WHERE id = ?", (game_id,))
         updated_game = dict(cursor.fetchone())
-        
         cursor.execute("SELECT * FROM game_players WHERE game_id = ? ORDER BY position", (game_id,))
         updated_players = cursor.fetchall()
         
-        # Parse for response
-        updated_game["deck"] = json.loads(updated_game["deck"]) if updated_game["deck"] else []
-        updated_game["discard_pile"] = json.loads(updated_game["discard_pile"]) if updated_game["discard_pile"] else []
-        updated_game["under_card"] = json.loads(updated_game["under_card"]) if updated_game["under_card"] else None
-        updated_game["table_spreads"] = json.loads(updated_game["table_spreads"]) if updated_game["table_spreads"] else []
-        updated_game["last_move"] = json.loads(updated_game["last_move"]) if updated_game["last_move"] else None
+        updated_game["deck"] = safe_json_parse(updated_game["deck"], [])
+        updated_game["discard_pile"] = safe_json_parse(updated_game["discard_pile"], [])
+        updated_game["under_card"] = safe_json_parse(updated_game["under_card"], None)
+        updated_game["table_spreads"] = safe_json_parse(updated_game["table_spreads"], [])
+        updated_game["last_move"] = safe_json_parse(updated_game["last_move"], None)
         
         game_players_response = []
         for p in updated_players:
             p_dict = dict(p)
-            p_dict["hand"] = json.loads(p_dict["hand"]) if p_dict["hand"] else []
-            p_dict["spreads"] = json.loads(p_dict["spreads"]) if p_dict["spreads"] else []
+            p_dict["hand"] = safe_json_parse(p_dict["hand"], [])
+            p_dict["spreads"] = safe_json_parse(p_dict["spreads"], [])
             p_dict["is_computer"] = bool(p_dict["is_computer"])
             game_players_response.append(p_dict)
         
         updated_game["players"] = game_players_response
-        
         conn.close()
         
         return {
@@ -823,8 +969,6 @@ async def make_move(game_id: str, request: MoveRequest):
         raise HTTPException(500, f"Failed to process move: {str(e)}")
 
 def process_game_move(game, player, move_type, move_data):
-    """Process game move logic"""
-    
     if move_type == "draw_from_deck":
         if not game["deck"]:
             raise HTTPException(400, "No cards left in deck")
@@ -868,7 +1012,6 @@ def process_game_move(game, player, move_type, move_data):
         if not card_id:
             raise HTTPException(400, "No card specified to discard")
         
-        # Find and remove card from hand
         card_to_discard = None
         for i, card in enumerate(player["hand"]):
             if card["id"] == card_id:
@@ -881,12 +1024,7 @@ def process_game_move(game, player, move_type, move_data):
         card_to_discard["isFaceUp"] = True
         game["discard_pile"].append(card_to_discard)
         
-        # Move to next player
-        cursor = get_db().cursor()
-        cursor.execute("SELECT COUNT(*) FROM game_players WHERE game_id = ?", (game["id"],))
-        player_count = cursor.fetchone()[0]
-        
-        next_player_index = (game["current_player_index"] + 1) % player_count
+        next_player_index = (game["current_player_index"] + 1) % 4  # Assuming 4 players
         
         return {
             "next_player_index": next_player_index,
@@ -901,7 +1039,6 @@ def process_game_move(game, player, move_type, move_data):
         }
     
     elif move_type == "create_spread":
-        # Simplified spread creation
         card_ids = move_data.get("cardIds", [])
         spread_type = move_data.get("type", "set")
         
@@ -948,14 +1085,12 @@ def process_game_move(game, player, move_type, move_data):
     else:
         raise HTTPException(400, f"Unknown move type: {move_type}")
 
-# ============ AI MOVE ENDPOINT (CRITICAL MISSING ENDPOINT) ============
+# ============ AI MOVE ENDPOINT ============
 @app.post("/api/game/{game_id}/ai-move")
 async def ai_move(game_id: str):
-    """Process an AI player move"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
         cursor.execute("SELECT * FROM games WHERE id = ?", (game_id,))
         game_row = cursor.fetchone()
         
@@ -968,12 +1103,11 @@ async def ai_move(game_id: str):
             raise HTTPException(400, "Game is not in progress")
         
         game = dict(game_row)
-        game["deck"] = json.loads(game["deck"]) if game["deck"] else []
-        game["discard_pile"] = json.loads(game["discard_pile"]) if game["discard_pile"] else []
-        game["under_card"] = json.loads(game["under_card"]) if game["under_card"] else None
+        game["deck"] = safe_json_parse(game["deck"], [])
+        game["discard_pile"] = safe_json_parse(game["discard_pile"], [])
+        game["under_card"] = safe_json_parse(game["under_card"], None)
         
         current_player_index = game["current_player_index"]
-        
         cursor.execute("SELECT * FROM game_players WHERE game_id = ? ORDER BY position", (game_id,))
         players = cursor.fetchall()
         
@@ -987,23 +1121,19 @@ async def ai_move(game_id: str):
             conn.close()
             raise HTTPException(400, "Current player is not an AI")
         
-        current_player["hand"] = json.loads(current_player["hand"]) if current_player["hand"] else []
-        current_player["spreads"] = json.loads(current_player["spreads"]) if current_player["spreads"] else []
+        current_player["hand"] = safe_json_parse(current_player["hand"], [])
+        current_player["spreads"] = safe_json_parse(current_player["spreads"], [])
         
-        # Simple AI logic
         ai_move_type = None
         ai_move_data = {}
         
         if game["turn_phase"] == "draw":
-            # AI decides to draw from deck or discard
             if game["discard_pile"] and random.random() > 0.5:
                 ai_move_type = "draw_from_discard"
             else:
                 ai_move_type = "draw_from_deck"
         elif game["turn_phase"] == "discard":
-            # AI chooses a card to discard
             if current_player["hand"]:
-                # Discard highest value card
                 highest_card = max(current_player["hand"], key=lambda x: x["value"])
                 ai_move_type = "discard"
                 ai_move_data = {"cardId": highest_card["id"]}
@@ -1012,7 +1142,6 @@ async def ai_move(game_id: str):
             conn.close()
             return {"success": False, "message": "AI couldn't decide on a move"}
         
-        # Process the AI move
         move_request = MoveRequest(
             playerId=current_player["id"],
             moveType=ai_move_type,
@@ -1020,8 +1149,6 @@ async def ai_move(game_id: str):
         )
         
         conn.close()
-        
-        # Use the regular move endpoint to process the move
         return await make_move(game_id, move_request)
         
     except Exception as e:
@@ -1031,11 +1158,9 @@ async def ai_move(game_id: str):
 # ============ GAME STATE ENDPOINTS ============
 @app.get("/api/game/{game_id}/state")
 async def get_game_state(game_id: str):
-    """Get game state"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
         cursor.execute("SELECT * FROM games WHERE id = ?", (game_id,))
         game_row = cursor.fetchone()
         
@@ -1047,23 +1172,23 @@ async def get_game_state(game_id: str):
         players = cursor.fetchall()
         
         game = dict(game_row)
-        game["deck"] = json.loads(game["deck"]) if game["deck"] else []
-        game["discard_pile"] = json.loads(game["discard_pile"]) if game["discard_pile"] else []
-        game["under_card"] = json.loads(game["under_card"]) if game["under_card"] else None
-        game["table_spreads"] = json.loads(game["table_spreads"]) if game["table_spreads"] else []
-        game["last_move"] = json.loads(game["last_move"]) if game["last_move"] else None
-        game["settings"] = json.loads(game["settings"]) if game["settings"] else {"allow_under_card_any_turn": True}
+        
+        game["deck"] = safe_json_parse(game["deck"], [])
+        game["discard_pile"] = safe_json_parse(game["discard_pile"], [])
+        game["under_card"] = safe_json_parse(game["under_card"], None)
+        game["table_spreads"] = safe_json_parse(game["table_spreads"], [])
+        game["last_move"] = safe_json_parse(game["last_move"], None)
         
         game_players = []
         for player in players:
             player_dict = dict(player)
             player_dict["is_computer"] = bool(player_dict["is_computer"])
-            player_dict["hand"] = json.loads(player_dict["hand"]) if player_dict["hand"] else []
-            player_dict["spreads"] = json.loads(player_dict["spreads"]) if player_dict["spreads"] else []
+            player_dict["hand"] = safe_json_parse(player_dict["hand"], [])
+            player_dict["spreads"] = safe_json_parse(player_dict["spreads"], [])
+            player_dict["is_online"] = bool(player_dict.get("is_online", 1))
             game_players.append(player_dict)
         
         game["players"] = game_players
-        
         conn.close()
         
         return {
@@ -1076,55 +1201,11 @@ async def get_game_state(game_id: str):
         print(f"Get game state error: {traceback.format_exc()}")
         raise HTTPException(500, f"Failed to get game state: {str(e)}")
 
-@app.get("/api/game/{game_id}/lobby")
-async def get_lobby_state(game_id: str):
-    """Get lobby state (players without cards)"""
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT * FROM games WHERE id = ?", (game_id,))
-        game_row = cursor.fetchone()
-        
-        if not game_row:
-            conn.close()
-            raise HTTPException(404, "Game not found")
-        
-        cursor.execute("SELECT * FROM game_players WHERE game_id = ? ORDER BY position", (game_id,))
-        players = cursor.fetchall()
-        
-        lobby_players = []
-        for player in players:
-            player_dict = dict(player)
-            player_dict["hand"] = []
-            player_dict["spreads"] = []
-            player_dict["is_computer"] = bool(player_dict["is_computer"])
-            lobby_players.append(player_dict)
-        
-        conn.close()
-        
-        return {
-            "success": True,
-            "players": lobby_players,
-            "status": game_row['game_status'],
-            "roomCode": game_row['room_code'],
-            "gameName": game_row['game_name'],
-            "maxPlayers": game_row['max_players'],
-            "canStart": len(players) >= 2,
-            "playerCount": len(players)
-        }
-        
-    except Exception as e:
-        print(f"Get lobby state error: {traceback.format_exc()}")
-        raise HTTPException(500, f"Failed to get lobby state: {str(e)}")
-
 @app.get("/api/game/available")
 async def get_available_games():
-    """Get available games"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
         cursor.execute('''
             SELECT g.id, g.room_code, g.game_name, g.creator_id, g.created_at,
                    COUNT(p.id) as player_count, g.max_players
@@ -1156,11 +1237,9 @@ async def get_available_games():
 
 @app.get("/api/game/user/{user_id}/active")
 async def get_user_active_game(user_id: str):
-    """Get user's active game"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
         cursor.execute('''
             SELECT g.id, g.room_code, g.game_status 
             FROM games g
@@ -1189,20 +1268,18 @@ async def get_user_active_game(user_id: str):
 # ============ NEW ENDPOINTS NEEDED BY FRONTEND ============
 @app.get("/api/game/room/{room_code}/id")
 async def get_game_id_by_room_code(room_code: str):
-    """Get game ID from room code"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
-        cursor.execute("SELECT id FROM games WHERE room_code = ?", (room_code.upper(),))
+        cursor.execute("SELECT id, game_status FROM games WHERE room_code = ?", (room_code.upper(),))
         game_row = cursor.fetchone()
-        
         conn.close()
         
         if game_row:
             return {
                 "success": True,
-                "gameId": game_row["id"]
+                "gameId": game_row["id"],
+                "gameStatus": game_row["game_status"]
             }
         else:
             raise HTTPException(404, f"Game not found with room code: {room_code}")
@@ -1215,11 +1292,9 @@ async def get_game_id_by_room_code(room_code: str):
 
 @app.get("/api/game/room/{room_code}/state")
 async def get_game_state_by_room_code(room_code: str):
-    """Get game state by room code"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
         cursor.execute("SELECT id FROM games WHERE room_code = ?", (room_code.upper(),))
         game_row = cursor.fetchone()
         
@@ -1229,7 +1304,6 @@ async def get_game_state_by_room_code(room_code: str):
         
         game_id = game_row["id"]
         conn.close()
-        
         return await get_game_state(game_id)
         
     except HTTPException:
@@ -1241,11 +1315,9 @@ async def get_game_state_by_room_code(room_code: str):
 # ============ DEBUG ENDPOINTS ============
 @app.get("/api/debug/db")
 async def debug_db():
-    """Debug database state"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = cursor.fetchall()
         
@@ -1257,7 +1329,6 @@ async def debug_db():
             counts[table_name] = count
         
         conn.close()
-        
         return {
             "tables": [t[0] for t in tables],
             "counts": counts,
@@ -1270,7 +1341,7 @@ async def debug_db():
 @app.get("/")
 async def root():
     return {
-        "message": "Tonk Game API - Fixed Version with AI Support",
+        "message": "Tonk Game API - Complete Version",
         "status": "running",
         "timestamp": datetime.now().isoformat(),
         "endpoints": {
@@ -1285,12 +1356,16 @@ async def root():
                 "start": "POST /api/game/{id}/start",
                 "state": "GET /api/game/{id}/state",
                 "lobby": "GET /api/game/{id}/lobby",
+                "lobby_updates": "GET /api/game/{id}/lobby/updates",
+                "player_ready": "POST /api/game/{game_id}/player/{player_id}/ready",
+                "check_player": "GET /api/game/{game_id}/player/{player_id}/check",
+                "reconnect": "POST /api/game/{game_id}/reconnect",
                 "available": "GET /api/game/available",
                 "user_active": "GET /api/game/user/{id}/active",
                 "room_id": "GET /api/game/room/{code}/id",
                 "room_state": "GET /api/game/room/{code}/state",
                 "move": "POST /api/game/{id}/move",
-                "ai_move": "POST /api/game/{id}/ai-move"  # NEW
+                "ai_move": "POST /api/game/{id}/ai-move"
             },
             "system": {
                 "ping": "GET /api/ping",
@@ -1300,9 +1375,11 @@ async def root():
             }
         },
         "notes": [
-            "AI players can now make moves via /api/game/{id}/ai-move",
-            "Database tables are preserved on restart",
-            "Full move processing implemented"
+            "Separate lobby and game state endpoints",
+            "AI move support via /api/game/{id}/ai-move",
+            "Lobby polling with /api/game/{id}/lobby/updates",
+            "Player ready status tracking",
+            "Database tables preserved on restart"
         ]
     }
 
