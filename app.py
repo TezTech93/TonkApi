@@ -402,9 +402,15 @@ async def create_game(game_data: GameCreate):
     cursor = conn.cursor()
     
     try:
+        print(f"🎮 Creating game with data: {game_data}")
+        
         # Generate game ID and room code
         game_id = str(uuid.uuid4())
+        
+        # Generate a 6-character room code without confusing characters
         room_code = ''.join(random.choices('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', k=6))
+        
+        print(f"🎮 Generated game_id: {game_id}, room_code: {room_code}")
         
         # Create game record
         cursor.execute(
@@ -419,12 +425,16 @@ async def create_game(game_data: GameCreate):
             player_id = str(uuid.uuid4())
             player_ids.append(player_id)
             
+            # Get user ID for human player (first non-computer)
+            user_id_for_player = None
+            if i == 0 and not player.is_computer and game_data.userId:
+                user_id_for_player = game_data.userId
+            
             cursor.execute(
                 """INSERT INTO game_players 
                    (id, game_id, user_id, player_name, position, is_computer, is_host) 
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (player_id, game_id, 
-                 game_data.userId if i == 0 and not player.is_computer else None,
+                (player_id, game_id, user_id_for_player,
                  player.name, i, player.is_computer, i == 0)
             )
         
@@ -449,7 +459,16 @@ async def create_game(game_data: GameCreate):
         conn.commit()
         
         # Return human player's ID (first non-computer player)
-        human_player_id = player_ids[0] if player_ids else None
+        human_player_id = None
+        for i, (player, pid) in enumerate(zip(game_data.players, player_ids)):
+            if not player.is_computer:
+                human_player_id = pid
+                break
+        
+        if not human_player_id and player_ids:
+            human_player_id = player_ids[0]
+        
+        print(f"✅ Game created: {room_code}, player_id: {human_player_id}")
         
         return {
             "success": True,
@@ -462,6 +481,10 @@ async def create_game(game_data: GameCreate):
         
     except Exception as e:
         conn.rollback()
+        print(f"❌ Error creating game: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create game: {str(e)}"
