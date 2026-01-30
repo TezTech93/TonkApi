@@ -407,7 +407,7 @@ def export_database_csv():
     writer.writerow(['=== GAME_PLAYERS TABLE ==='])
     cursor.execute("SELECT * FROM game_players")
     game_players = cursor.fetchall()
-    if game_players:
+    if game_players):
         writer.writerow([col[0] for col in cursor.description])
         writer.writerows(game_players)
     writer.writerow([])
@@ -529,12 +529,15 @@ async def register(user_data: UserRegister):
     cursor = conn.cursor()
     
     try:
+        print(f"📝 Registration attempt for: {user_data.username}")
+        
         # Check if user already exists
         cursor.execute("SELECT id FROM users WHERE username = ? OR email = ?", 
                       (user_data.username, user_data.email))
         existing_user = cursor.fetchone()
         
         if existing_user:
+            print(f"❌ User already exists: {user_data.username}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Username or email already exists"
@@ -543,6 +546,8 @@ async def register(user_data: UserRegister):
         # Create new user
         user_id = str(uuid.uuid4())
         password_hash = hash_password(user_data.password)
+        
+        print(f"✅ Creating user: {user_data.username} with ID: {user_id}")
         
         cursor.execute(
             "INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, ?)",
@@ -553,6 +558,8 @@ async def register(user_data: UserRegister):
         access_token = create_access_token(user_id, user_data.username)
         
         conn.commit()
+        
+        print(f"✅ Registration successful for: {user_data.username}")
         
         return {
             "success": True,
@@ -567,6 +574,7 @@ async def register(user_data: UserRegister):
         raise
     except Exception as e:
         conn.rollback()
+        print(f"❌ Registration error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Registration failed: {str(e)}"
@@ -581,6 +589,8 @@ async def login(user_data: UserLogin):
     cursor = conn.cursor()
     
     try:
+        print(f"🔐 Login attempt for: {user_data.username}")
+        
         # Find user by username
         cursor.execute(
             "SELECT id, username, password_hash FROM users WHERE username = ?",
@@ -589,13 +599,17 @@ async def login(user_data: UserLogin):
         user = cursor.fetchone()
         
         if not user:
+            print(f"❌ User not found: {user_data.username}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid username or password"
             )
         
+        print(f"✅ User found: {user['username']}")
+        
         # Verify password
         if not verify_password(user_data.password, user['password_hash']):
+            print(f"❌ Password incorrect for user: {user_data.username}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid username or password"
@@ -612,6 +626,8 @@ async def login(user_data: UserLogin):
         
         conn.commit()
         
+        print(f"✅ Login successful for: {user['username']}")
+        
         return {
             "success": True,
             "message": "Login successful",
@@ -625,6 +641,7 @@ async def login(user_data: UserLogin):
         raise
     except Exception as e:
         conn.rollback()
+        print(f"❌ Login error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Login failed: {str(e)}"
@@ -641,15 +658,57 @@ async def validate_token(current_user: Dict = Depends(get_current_user)):
         "username": current_user["username"]
     }
 
-# Game Endpoints
-@app.post("/api/game/create")
-async def create_game(game_data: GameCreate):
-    """Create a new game"""
+# ADD THIS NEW ENDPOINT - Profile endpoint
+@app.get("/api/auth/profile")
+async def get_user_profile(current_user: Dict = Depends(get_current_user)):
+    """Get user profile"""
     conn = get_db()
     cursor = conn.cursor()
     
     try:
-        print(f"🎮 Creating game with data: {game_data}")
+        cursor.execute(
+            "SELECT id, username, email, created_at, last_login FROM users WHERE id = ?",
+            (current_user["user_id"],)
+        )
+        user = cursor.fetchone()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        return {
+            "success": True,
+            "profile": {
+                "id": user['id'],
+                "username": user['username'],
+                "email": user['email'],
+                "created_at": user['created_at'],
+                "last_login": user['last_login']
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get profile: {str(e)}"
+        )
+    finally:
+        conn.close()
+
+# Game Endpoints
+@app.post("/api/game/create")
+async def create_game(game_data: GameCreate, current_user: Dict = Depends(get_current_user)):
+    """Create a new game (requires authentication)"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        print(f"🎮 Creating game for user: {current_user['username']}")
+        print(f"🎮 Game data: {game_data.dict()}")
         
         # Generate game ID and room code
         game_id = str(uuid.uuid4())
@@ -659,11 +718,11 @@ async def create_game(game_data: GameCreate):
         
         print(f"🎮 Generated game_id: {game_id}, room_code: {room_code}")
         
-        # Create game record
+        # Create game record - use current_user's ID as creator
         cursor.execute(
             """INSERT INTO games (id, room_code, game_name, creator_id, game_status) 
                VALUES (?, ?, ?, ?, ?)""",
-            (game_id, room_code, game_data.game_name, game_data.userId, 'lobby')
+            (game_id, room_code, game_data.game_name, current_user['user_id'], 'lobby')
         )
         
         # Add players to game
@@ -674,15 +733,15 @@ async def create_game(game_data: GameCreate):
             
             # Get user ID for human player (first non-computer)
             user_id_for_player = None
-            if i == 0 and not player.is_computer and game_data.userId:
-                user_id_for_player = game_data.userId
+            if i == 0 and not player.is_computer:
+                user_id_for_player = current_user['user_id']
             
             cursor.execute(
                 """INSERT INTO game_players 
-                   (id, game_id, user_id, player_name, position, is_computer, is_host) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (id, game_id, user_id, player_name, position, is_computer, is_host, is_ready) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (player_id, game_id, user_id_for_player,
-                 player.name, i, player.is_computer, i == 0)
+                 player.name, i, player.is_computer, i == 0, True)
             )
         
         # Create initial game state
@@ -698,9 +757,10 @@ async def create_game(game_data: GameCreate):
         game_state = create_initial_game_state(game_id, room_code, players_for_state)
         
         # Save game state
+        state_id = str(uuid.uuid4())
         cursor.execute(
             "INSERT INTO game_states (id, game_id, state_json) VALUES (?, ?, ?)",
-            (str(uuid.uuid4()), game_id, json.dumps(game_state))
+            (state_id, game_id, json.dumps(game_state))
         )
         
         conn.commit()
@@ -740,12 +800,14 @@ async def create_game(game_data: GameCreate):
         conn.close()
 
 @app.post("/api/game/{room_code}/join")
-async def join_game(room_code: str, join_data: GameJoin):
-    """Join an existing game"""
+async def join_game(room_code: str, join_data: GameJoin, current_user: Dict = Depends(get_current_user)):
+    """Join an existing game (requires authentication)"""
     conn = get_db()
     cursor = conn.cursor()
     
     try:
+        print(f"🎮 Join attempt for room: {room_code} by user: {current_user['username']}")
+        
         # Find game by room code
         cursor.execute(
             "SELECT id, game_status, max_players FROM games WHERE room_code = ?",
@@ -772,7 +834,7 @@ async def join_game(room_code: str, join_data: GameJoin):
         )
         player_count = cursor.fetchone()['count']
         
-        if player_count >= game['max_players']:
+        if player_count >= 4:  # Max 4 players
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Game is full"
@@ -784,10 +846,10 @@ async def join_game(room_code: str, join_data: GameJoin):
         
         cursor.execute(
             """INSERT INTO game_players 
-               (id, game_id, user_id, player_name, position, is_computer, is_host) 
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (player_id, game['id'], join_data.userId, join_data.playerName, 
-             position, False, False)
+               (id, game_id, user_id, player_name, position, is_computer, is_host, is_ready) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (player_id, game['id'], current_user['user_id'], join_data.playerName, 
+             position, False, False, True)
         )
         
         # Get updated game state
@@ -797,6 +859,7 @@ async def join_game(room_code: str, join_data: GameJoin):
         )
         state_record = cursor.fetchone()
         
+        game_state = None
         if state_record:
             game_state = json.loads(state_record['state_json'])
             
@@ -809,7 +872,7 @@ async def join_game(room_code: str, join_data: GameJoin):
                 'is_current_turn': False,
                 'position': position,
                 'points': 0,
-                'is_ready': False
+                'is_ready': True
             })
             
             # Update game state
@@ -831,11 +894,13 @@ async def join_game(room_code: str, join_data: GameJoin):
                     'is_current_turn': False,
                     'position': 0,
                     'points': 0,
-                    'is_ready': False
+                    'is_ready': True
                 }]
             }
         
         conn.commit()
+        
+        print(f"✅ User {current_user['username']} joined game {room_code}")
         
         return {
             "success": True,
@@ -849,6 +914,7 @@ async def join_game(room_code: str, join_data: GameJoin):
         raise
     except Exception as e:
         conn.rollback()
+        print(f"❌ Error joining game: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to join game: {str(e)}"
@@ -858,7 +924,7 @@ async def join_game(room_code: str, join_data: GameJoin):
 
 @app.get("/api/game/{identifier}/state")
 async def get_game_state(identifier: str):
-    """Get current game state"""
+    """Get current game state (public)"""
     conn = get_db()
     cursor = conn.cursor()
     
@@ -931,7 +997,7 @@ async def get_game_state(identifier: str):
 
 @app.get("/api/game/{identifier}/lobby")
 async def get_lobby_state(identifier: str):
-    """Get lobby state (without cards)"""
+    """Get lobby state (without cards) - public"""
     conn = get_db()
     cursor = conn.cursor()
     
@@ -1003,11 +1069,13 @@ async def get_lobby_state(identifier: str):
 
 @app.post("/api/game/{identifier}/start")
 async def start_game(identifier: str, current_user: Dict = Depends(get_current_user)):
-    """Start a game"""
+    """Start a game (requires authentication and host status)"""
     conn = get_db()
     cursor = conn.cursor()
     
     try:
+        print(f"🎮 Start game request for: {identifier} by user: {current_user['username']}")
+        
         # Find game
         cursor.execute(
             "SELECT id, room_code, game_status FROM games WHERE id = ? OR room_code = ?",
@@ -1036,6 +1104,7 @@ async def start_game(identifier: str, current_user: Dict = Depends(get_current_u
         player = cursor.fetchone()
         
         if not player or not player['is_host']:
+            print(f"❌ User {current_user['username']} is not the host")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only the host can start the game"
@@ -1096,6 +1165,8 @@ async def start_game(identifier: str, current_user: Dict = Depends(get_current_u
         
         conn.commit()
         
+        print(f"✅ Game {identifier} started successfully")
+        
         return {
             "success": True,
             "message": "Game started successfully",
@@ -1106,6 +1177,7 @@ async def start_game(identifier: str, current_user: Dict = Depends(get_current_u
         raise
     except Exception as e:
         conn.rollback()
+        print(f"❌ Error starting game: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to start game: {str(e)}"
