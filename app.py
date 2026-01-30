@@ -10,6 +10,11 @@ import random
 from passlib.context import CryptContext
 import sqlite3
 import os
+import csv
+import io
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import UploadFile, File, Form
+import jwt
 
 # Initialize FastAPI
 app = FastAPI(title="Tonk API", description="API for Tonk Card Game")
@@ -26,6 +31,10 @@ app.add_middleware(
 # Security
 security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# JWT Configuration
+SECRET_KEY = os.environ.get("SECRET_KEY", "tonk-game-secret-key-change-in-production")
+ALGORITHM = "HS256"
 
 # Database setup
 DATABASE_FILE = "tonk_game.db"
@@ -146,24 +155,31 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
 def create_access_token(user_id: str, username: str) -> str:
-    """Create a JWT token (simplified version)"""
-    # In a real app, use proper JWT with jose library
+    """Create a JWT token"""
+    expire = datetime.utcnow() + timedelta(days=7)
     token_data = {
         "sub": username,
         "user_id": user_id,
-        "exp": datetime.utcnow() + timedelta(days=7)
+        "exp": expire,
+        "iat": datetime.utcnow()
     }
-    return f"mock_jwt.{user_id}.{username}"
+    token = jwt.encode(token_data, SECRET_KEY, algorithm=ALGORITHM)
+    return token
 
 def verify_token(token: str) -> Optional[Dict]:
-    """Verify a token (simplified)"""
+    """Verify a JWT token"""
     try:
-        parts = token.split(".")
-        if len(parts) == 3 and parts[0] == "mock_jwt":
-            return {"user_id": parts[1], "username": parts[2]}
-    except:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return {
+            "user_id": payload.get("user_id"),
+            "username": payload.get("sub")
+        }
+    except jwt.ExpiredSignatureError:
         return None
-    return None
+    except jwt.InvalidTokenError:
+        return None
+    except Exception:
+        return None
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Get current user from token"""
@@ -251,6 +267,235 @@ def create_initial_game_state(game_id, room_code, players):
     
     return game_state
 
+# Enhanced game logic functions
+def calculate_hand_points(hand):
+    """Calculate total points in hand"""
+    total = 0
+    for card in hand:
+        # Aces are 1, face cards are 10, others are their numeric value
+        if card['rank'] in ['J', 'Q', 'K']:
+            total += 10
+        elif card['rank'] == 'A':
+            total += 1
+        else:
+            total += int(card['rank'])
+    return total
+
+def is_valid_spread(cards):
+    """Check if cards form a valid spread (run or set)"""
+    if len(cards) < 3:
+        return False
+    
+    # Check for set (same rank)
+    ranks = [card['rank'] for card in cards]
+    if len(set(ranks)) == 1:
+        return True
+    
+    # Check for run (consecutive ranks, same suit)
+    suits = [card['suit'] for card in cards]
+    if len(set(suits)) > 1:
+        return False
+    
+    # Sort by rank value
+    rank_order = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
+    sorted_cards = sorted(cards, key=lambda x: rank_order.index(x['rank']))
+    
+    for i in range(1, len(sorted_cards)):
+        current_idx = rank_order.index(sorted_cards[i]['rank'])
+        prev_idx = rank_order.index(sorted_cards[i-1]['rank'])
+        if current_idx != prev_idx + 1:
+            return False
+    
+    return True
+
+def check_for_tonk(hand):
+    """Check if player has Tonk (5 points or less)"""
+    return calculate_hand_points(hand) <= 5
+
+def get_valid_moves(game_state, player_id):
+    """Determine valid moves for player"""
+    player = next((p for p in game_state['players'] if p['id'] == player_id), None)
+    if not player:
+        return []
+    
+    turn_phase = game_state.get('turn_phase', 'waiting')
+    current_player_idx = game_state.get('current_player_index', 0)
+    current_player = game_state['players'][current_player_idx] if game_state['players'] else None
+    
+    moves = []
+    
+    if player['id'] != current_player['id']:
+        return moves  # Not player's turn
+    
+    if turn_phase == 'draw':
+        moves.append('draw_from_deck')
+        if game_state['discard_pile']:
+            moves.append('draw_from_discard')
+    
+    elif turn_phase == 'play':
+        # Can play spreads if they have valid ones
+        hand = player['hand']
+        # Check for any valid spreads
+        # Simplified: can always discard
+        moves.append('discard')
+        # Could add 'play_spread' here
+    
+    elif turn_phase == 'discard':
+        moves.append('discard')
+    
+    return moves
+
+# Database export/import functions
+def export_database():
+    """Export entire database as JSON"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    data = {}
+    
+    # Export users
+    cursor.execute("SELECT * FROM users")
+    users = [dict(row) for row in cursor.fetchall()]
+    data['users'] = users
+    
+    # Export games
+    cursor.execute("SELECT * FROM games")
+    games = [dict(row) for row in cursor.fetchall()]
+    data['games'] = games
+    
+    # Export game_players
+    cursor.execute("SELECT * FROM game_players")
+    game_players = [dict(row) for row in cursor.fetchall()]
+    data['game_players'] = game_players
+    
+    # Export game_states
+    cursor.execute("SELECT * FROM game_states")
+    game_states = [dict(row) for row in cursor.fetchall()]
+    data['game_states'] = game_states
+    
+    conn.close()
+    
+    return data
+
+def export_database_csv():
+    """Export entire database as CSV"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Export users table
+    writer.writerow(['=== USERS TABLE ==='])
+    cursor.execute("SELECT * FROM users")
+    users = cursor.fetchall()
+    if users:
+        writer.writerow([col[0] for col in cursor.description])
+        writer.writerows(users)
+    writer.writerow([])
+    
+    # Export games table
+    writer.writerow(['=== GAMES TABLE ==='])
+    cursor.execute("SELECT * FROM games")
+    games = cursor.fetchall()
+    if games:
+        writer.writerow([col[0] for col in cursor.description])
+        writer.writerows(games)
+    writer.writerow([])
+    
+    # Export game_players table
+    writer.writerow(['=== GAME_PLAYERS TABLE ==='])
+    cursor.execute("SELECT * FROM game_players")
+    game_players = cursor.fetchall()
+    if game_players:
+        writer.writerow([col[0] for col in cursor.description])
+        writer.writerows(game_players)
+    writer.writerow([])
+    
+    # Export game_states table
+    writer.writerow(['=== GAME_STATES TABLE ==='])
+    cursor.execute("SELECT * FROM game_states")
+    game_states = cursor.fetchall()
+    if game_states:
+        writer.writerow([col[0] for col in cursor.description])
+        writer.writerows(game_states)
+    
+    conn.close()
+    
+    return output.getvalue()
+
+def import_database(data):
+    """Import database from JSON"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        # Clear existing data
+        cursor.execute("DELETE FROM game_states")
+        cursor.execute("DELETE FROM game_players")
+        cursor.execute("DELETE FROM games")
+        cursor.execute("DELETE FROM users")
+        
+        # Import users
+        if 'users' in data:
+            for user in data['users']:
+                cursor.execute(
+                    """INSERT INTO users 
+                       (id, username, email, password_hash, created_at, last_login)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (user['id'], user['username'], user['email'], 
+                     user['password_hash'], user['created_at'], user['last_login'])
+                )
+        
+        # Import games
+        if 'games' in data:
+            for game in data['games']:
+                cursor.execute(
+                    """INSERT INTO games 
+                       (id, room_code, game_name, creator_id, game_status, 
+                        max_players, created_at, started_at, completed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (game['id'], game['room_code'], game['game_name'], 
+                     game['creator_id'], game['game_status'], game['max_players'],
+                     game['created_at'], game['started_at'], game['completed_at'])
+                )
+        
+        # Import game_players
+        if 'game_players' in data:
+            for player in data['game_players']:
+                cursor.execute(
+                    """INSERT INTO game_players 
+                       (id, game_id, user_id, player_name, position, 
+                        is_computer, is_ready, is_host, joined_at, left_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (player['id'], player['game_id'], player['user_id'],
+                     player['player_name'], player['position'], player['is_computer'],
+                     player['is_ready'], player['is_host'], player['joined_at'],
+                     player['left_at'])
+                )
+        
+        # Import game_states
+        if 'game_states' in data:
+            for state in data['game_states']:
+                cursor.execute(
+                    """INSERT INTO game_states 
+                       (id, game_id, state_json, last_updated, 
+                        turn_count, current_player_index, turn_phase)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (state['id'], state['game_id'], state['state_json'],
+                     state['last_updated'], state['turn_count'],
+                     state['current_player_index'], state['turn_phase'])
+                )
+        
+        conn.commit()
+        return {"success": True, "message": f"Imported {len(data.get('users', []))} users, {len(data.get('games', []))} games"}
+        
+    except Exception as e:
+        conn.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        conn.close()
+
 # API Endpoints
 @app.get("/")
 async def root():
@@ -276,6 +521,7 @@ async def api_ping():
     """API health check"""
     return await ping()
 
+# Authentication Endpoints
 @app.post("/api/auth/register")
 async def register(user_data: UserRegister):
     """Register a new user"""
@@ -395,6 +641,7 @@ async def validate_token(current_user: Dict = Depends(get_current_user)):
         "username": current_user["username"]
     }
 
+# Game Endpoints
 @app.post("/api/game/create")
 async def create_game(game_data: GameCreate):
     """Create a new game"""
@@ -944,6 +1191,180 @@ async def make_move(game_id: str, move_request: MoveRequest):
     finally:
         conn.close()
 
+@app.post("/api/game/{game_id}/move-enhanced")
+async def make_enhanced_move(game_id: str, move_request: MoveRequest):
+    """Make a move with enhanced game logic"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        # Get game and state
+        cursor.execute(
+            "SELECT game_status FROM games WHERE id = ?",
+            (game_id,)
+        )
+        game = cursor.fetchone()
+        
+        if not game:
+            raise HTTPException(status_code=404, detail="Game not found")
+        
+        if game['game_status'] != 'playing':
+            raise HTTPException(status_code=400, detail="Game is not in progress")
+        
+        cursor.execute(
+            "SELECT state_json FROM game_states WHERE game_id = ?",
+            (game_id,)
+        )
+        state_record = cursor.fetchone()
+        
+        if not state_record:
+            raise HTTPException(status_code=404, detail="Game state not found")
+        
+        game_state = json.loads(state_record['state_json'])
+        
+        # Validate player turn
+        current_player_idx = game_state.get('current_player_index', 0)
+        current_player = game_state['players'][current_player_idx] if game_state['players'] else None
+        
+        if not current_player or current_player['id'] != move_request.playerId:
+            raise HTTPException(status_code=400, detail="Not player's turn")
+        
+        # Process move based on type
+        move_result = {
+            'success': False,
+            'message': '',
+            'gameState': game_state
+        }
+        
+        player = next((p for p in game_state['players'] if p['id'] == move_request.playerId), None)
+        
+        if move_request.moveType == 'draw_from_deck':
+            if game_state['deck']:
+                drawn_card = game_state['deck'].pop()
+                player['hand'].append(drawn_card)
+                game_state['turn_phase'] = 'play'
+                move_result['success'] = True
+                move_result['message'] = f"Drew {drawn_card['rank']} of {drawn_card['suit']}"
+            else:
+                raise HTTPException(status_code=400, detail="Deck is empty")
+        
+        elif move_request.moveType == 'draw_from_discard':
+            if game_state['discard_pile']:
+                drawn_card = game_state['discard_pile'].pop()
+                player['hand'].append(drawn_card)
+                game_state['turn_phase'] = 'play'
+                move_result['success'] = True
+                move_result['message'] = f"Drew {drawn_card['rank']} of {drawn_card['suit']} from discard"
+            else:
+                raise HTTPException(status_code=400, detail="Discard pile is empty")
+        
+        elif move_request.moveType == 'discard':
+            card_id = move_request.moveData.get('cardId')
+            if not card_id:
+                raise HTTPException(status_code=400, detail="No card specified")
+            
+            # Find and remove card from hand
+            card_index = None
+            for i, card in enumerate(player['hand']):
+                if card.get('id') == card_id:
+                    card_index = i
+                    break
+            
+            if card_index is None:
+                raise HTTPException(status_code=400, detail="Card not found in hand")
+            
+            discarded_card = player['hand'].pop(card_index)
+            game_state['discard_pile'].append(discarded_card)
+            
+            # Check for Tonk after discard
+            if check_for_tonk(player['hand']):
+                game_state['game_status'] = 'game_over'
+                game_state['winner'] = player['name']
+                game_state['win_reason'] = 'tonk'
+                move_result['message'] = f"{player['name']} got TONK! Game over!"
+            else:
+                # Move to next player
+                game_state['current_player_index'] = (current_player_idx + 1) % len(game_state['players'])
+                game_state['turn_phase'] = 'draw'
+                game_state['turn_count'] = game_state.get('turn_count', 0) + 1
+                move_result['message'] = f"{player['name']} discarded {discarded_card['rank']} of {discarded_card['suit']}"
+        
+        elif move_request.moveType == 'play_spread':
+            spread_cards = move_request.moveData.get('cards', [])
+            if len(spread_cards) < 3:
+                raise HTTPException(status_code=400, detail="Spread must have at least 3 cards")
+            
+            # Validate spread
+            spread_cards_objects = []
+            for card_id in spread_cards:
+                card_found = False
+                for i, card in enumerate(player['hand']):
+                    if card.get('id') == card_id:
+                        spread_cards_objects.append(card)
+                        player['hand'].pop(i)
+                        card_found = True
+                        break
+                if not card_found:
+                    raise HTTPException(status_code=400, detail=f"Card {card_id} not found in hand")
+            
+            if not is_valid_spread(spread_cards_objects):
+                # Return cards to hand
+                player['hand'].extend(spread_cards_objects)
+                raise HTTPException(status_code=400, detail="Invalid spread")
+            
+            # Add spread to table
+            if 'table_spreads' not in game_state:
+                game_state['table_spreads'] = []
+            
+            game_state['table_spreads'].append({
+                'id': f"spread_{len(game_state['table_spreads'])}",
+                'cards': spread_cards_objects,
+                'player': player['name']
+            })
+            
+            move_result['success'] = True
+            move_result['message'] = f"{player['name']} played a spread"
+        
+        # Update last move
+        game_state['last_move'] = {
+            'playerId': move_request.playerId,
+            'playerName': player['name'],
+            'moveType': move_request.moveType,
+            'moveData': move_request.moveData,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        
+        # Save updated state
+        cursor.execute(
+            "UPDATE game_states SET state_json = ?, last_updated = CURRENT_TIMESTAMP WHERE game_id = ?",
+            (json.dumps(game_state), game_id)
+        )
+        
+        # Update game if over
+        if game_state['game_status'] == 'game_over':
+            cursor.execute(
+                "UPDATE games SET game_status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (game_id,)
+            )
+        
+        conn.commit()
+        
+        move_result['gameState'] = game_state
+        move_result['success'] = True
+        
+        return move_result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to make move: {str(e)}"
+        )
+    finally:
+        conn.close()
+
 @app.post("/api/game/{game_id}/ai-move")
 async def ai_move(game_id: str):
     """Trigger AI move"""
@@ -989,7 +1410,87 @@ async def get_game_id(room_code: str):
     finally:
         conn.close()
 
+# Admin Endpoints
+@app.get("/api/admin/export/json")
+async def export_database_json(admin_token: str = Form(...)):
+    """Export entire database as JSON (protected)"""
+    # Simple admin token check (in production, use proper auth)
+    if admin_token != "tonk_admin_123":
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+    
+    data = export_database()
+    return JSONResponse(content=data)
+
+@app.get("/api/admin/export/csv")
+async def export_database_csv_endpoint(admin_token: str = Form(...)):
+    """Export entire database as CSV (protected)"""
+    if admin_token != "tonk_admin_123":
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+    
+    csv_data = export_database_csv()
+    return StreamingResponse(
+        io.StringIO(csv_data),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=tonk_database.csv"}
+    )
+
+@app.post("/api/admin/import")
+async def import_database_endpoint(
+    admin_token: str = Form(...),
+    file: UploadFile = File(...)
+):
+    """Import database from JSON file"""
+    if admin_token != "tonk_admin_123":
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+    
+    try:
+        content = await file.read()
+        data = json.loads(content.decode('utf-8'))
+        
+        result = import_database(data)
+        
+        if result['success']:
+            return {"success": True, "message": result['message']}
+        else:
+            raise HTTPException(status_code=400, detail=result['error'])
+            
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON file")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/stats")
+async def get_database_stats(admin_token: str = Form(...)):
+    """Get database statistics"""
+    if admin_token != "tonk_admin_123":
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    stats = {}
+    
+    cursor.execute("SELECT COUNT(*) FROM users")
+    stats['total_users'] = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM games")
+    stats['total_games'] = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM game_players")
+    stats['total_players'] = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM games WHERE game_status = 'playing'")
+    stats['active_games'] = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM games WHERE game_status = 'lobby'")
+    stats['lobby_games'] = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    return stats
+
 # Run the app
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
