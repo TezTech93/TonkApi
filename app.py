@@ -35,6 +35,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # JWT Configuration
 SECRET_KEY = os.environ.get("SECRET_KEY", "tonk-game-secret-key-change-in-production")
 ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_DAYS = 7  # Token expires in 7 days
 
 # Database setup
 DATABASE_FILE = "tonk_game.db"
@@ -156,7 +157,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_access_token(user_id: str, username: str) -> str:
     """Create a JWT token"""
-    expire = datetime.utcnow() + timedelta(days=7)
+    expire = datetime.utcnow() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
     token_data = {
         "sub": username,
         "user_id": user_id,
@@ -172,13 +173,17 @@ def verify_token(token: str) -> Optional[Dict]:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return {
             "user_id": payload.get("user_id"),
-            "username": payload.get("sub")
+            "username": payload.get("sub"),
+            "exp": payload.get("exp")
         }
     except jwt.ExpiredSignatureError:
+        print(f"❌ Token expired")
         return None
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as e:
+        print(f"❌ Invalid token: {e}")
         return None
-    except Exception:
+    except Exception as e:
+        print(f"❌ Token verification error: {e}")
         return None
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -188,7 +193,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication credentials",
+            detail="Invalid or expired authentication token",
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user
@@ -333,12 +338,7 @@ def get_valid_moves(game_state, player_id):
             moves.append('draw_from_discard')
     
     elif turn_phase == 'play':
-        # Can play spreads if they have valid ones
-        hand = player['hand']
-        # Check for any valid spreads
-        # Simplified: can always discard
         moves.append('discard')
-        # Could add 'play_spread' here
     
     elif turn_phase == 'discard':
         moves.append('discard')
@@ -407,7 +407,7 @@ def export_database_csv():
     writer.writerow(['=== GAME_PLAYERS TABLE ==='])
     cursor.execute("SELECT * FROM game_players")
     game_players = cursor.fetchall()
-    if game_players):
+    if game_players:
         writer.writerow([col[0] for col in cursor.description])
         writer.writerows(game_players)
     writer.writerow([])
@@ -503,7 +503,8 @@ async def root():
     return {
         "message": "Tonk Game API",
         "status": "running",
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "1.0.0"
     }
 
 @app.get("/ping")
@@ -513,7 +514,8 @@ async def ping():
         "status": "pong",
         "timestamp": datetime.utcnow().isoformat(),
         "server": "TonkAPI",
-        "environment": "Render.com"
+        "environment": "Render.com",
+        "database": "SQLite"
     }
 
 @app.get("/api/ping")
@@ -567,7 +569,8 @@ async def register(user_data: UserRegister):
             "access_token": access_token,
             "token_type": "bearer",
             "user_id": user_id,
-            "username": user_data.username
+            "username": user_data.username,
+            "expires_in": f"{ACCESS_TOKEN_EXPIRE_DAYS} days"
         }
         
     except HTTPException:
@@ -634,7 +637,8 @@ async def login(user_data: UserLogin):
             "access_token": access_token,
             "token_type": "bearer",
             "user_id": user['id'],
-            "username": user['username']
+            "username": user['username'],
+            "expires_in": f"{ACCESS_TOKEN_EXPIRE_DAYS} days"
         }
         
     except HTTPException:
@@ -658,7 +662,6 @@ async def validate_token(current_user: Dict = Depends(get_current_user)):
         "username": current_user["username"]
     }
 
-# ADD THIS NEW ENDPOINT - Profile endpoint
 @app.get("/api/auth/profile")
 async def get_user_profile(current_user: Dict = Depends(get_current_user)):
     """Get user profile"""
@@ -708,7 +711,6 @@ async def create_game(game_data: GameCreate, current_user: Dict = Depends(get_cu
     
     try:
         print(f"🎮 Creating game for user: {current_user['username']}")
-        print(f"🎮 Game data: {game_data.dict()}")
         
         # Generate game ID and room code
         game_id = str(uuid.uuid4())
@@ -1565,4 +1567,7 @@ async def get_database_stats(admin_token: str = Form(...)):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    print(f"🚀 Starting Tonk API server on port {port}")
+    print(f"📁 Database file: {DATABASE_FILE}")
+    print(f"🔑 JWT Algorithm: {ALGORITHM}")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
