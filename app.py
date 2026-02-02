@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, validator
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 import uuid
@@ -15,6 +15,7 @@ import io
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi import UploadFile, File, Form
 import jwt
+import re
 
 # Initialize FastAPI
 app = FastAPI(title="Tonk API", description="API for Tonk Card Game")
@@ -111,11 +112,35 @@ def init_db():
 # Initialize database on startup
 init_db()
 
-# Pydantic models
+# Pydantic models with custom email validation
 class UserRegister(BaseModel):
     username: str
-    email: EmailStr
+    email: str
     password: str
+    
+    @validator('email')
+    def validate_email(cls, v):
+        """Simple email validation using regex"""
+        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+        if not re.match(email_regex, v):
+            raise ValueError('Invalid email address')
+        return v
+    
+    @validator('username')
+    def validate_username(cls, v):
+        """Username validation"""
+        if len(v) < 3 or len(v) > 20:
+            raise ValueError('Username must be 3-20 characters')
+        if not re.match(r'^[a-zA-Z0-9_]+$', v):
+            raise ValueError('Username can only contain letters, numbers, and underscores')
+        return v
+    
+    @validator('password')
+    def validate_password(cls, v):
+        """Password validation"""
+        if len(v) < 6:
+            raise ValueError('Password must be at least 6 characters')
+        return v
 
 class UserLogin(BaseModel):
     username: str
