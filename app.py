@@ -145,6 +145,11 @@ class UserRegister(BaseModel):
 class UserLogin(BaseModel):
     username: str
     password: str
+    
+class UserUpdate(BaseModel):
+    email: Optional[str] = None
+    current_password: Optional[str] = None
+    new_password: Optional[str] = None
 
 class PlayerCreate(BaseModel):
     name: str
@@ -222,6 +227,78 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user
+    
+def get_user_by_id(user_id: str):
+    """Get user by ID from database"""
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT id, username, email, created_at, last_login, games_played, games_won, total_score FROM users WHERE id = ?",
+            (user_id,)
+        )
+        user = cursor.fetchone()
+        return dict(user) if user else None
+    finally:
+        conn.close()
+
+def get_user_by_username(username: str):
+    """Get user by username from database"""
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT id, username, email, created_at, last_login, games_played, games_won, total_score FROM users WHERE username = ?",
+            (username,)
+        )
+        user = cursor.fetchone()
+        return dict(user) if user else None
+    finally:
+        conn.close()
+
+def get_user_stats(user_id: str):
+    """Get comprehensive user statistics"""
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        # Get basic user info
+        cursor.execute(
+            "SELECT username, games_played, games_won, total_score FROM users WHERE id = ?",
+            (user_id,)
+        )
+        user = cursor.fetchone()
+        
+        if not user:
+            return None
+            
+        stats = dict(user)
+        
+        # Get recent games
+        cursor.execute(
+            """
+            SELECT g.id, g.room_code, g.game_name, g.game_status, g.created_at, 
+                   g.started_at, g.completed_at, g.winner_id,
+                   gp.score as player_score
+            FROM games g
+            JOIN game_players gp ON g.id = gp.game_id
+            WHERE gp.user_id = ?
+            ORDER BY g.created_at DESC
+            LIMIT 10
+            """,
+            (user_id,)
+        )
+        recent_games = cursor.fetchall()
+        stats['recent_games'] = [dict(game) for game in recent_games]
+        
+        # Get win rate
+        if stats['games_played'] > 0:
+            stats['win_rate'] = (stats['games_won'] / stats['games_played']) * 100
+        else:
+            stats['win_rate'] = 0
+            
+        return stats
+    finally:
+        conn.close()
 
 # Deck and card utilities
 def create_deck():
@@ -547,6 +624,317 @@ async def ping():
 async def api_ping():
     """API health check"""
     return await ping()
+    
+@app.get("/api/users")
+async def get_all_users(
+    current_user: Dict = Depends(get_current_user),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0)
+):
+    """Get all users (paginated) - Requires authentication"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        # Count total users
+        cursor.execute("SELECT COUNT(*) as total FROM users")
+        total = cursor.fetchone()['total']
+        
+        # Get paginated users
+        cursor.execute(
+            """
+            SELECT id, username, email, created_at, last_login, 
+                   games_played, games_won, total_score
+            FROM users 
+            ORDER BY username
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset)
+        )
+        users = cursor.fetchall()
+        
+        return {
+            "success": True,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "users": [
+                {
+                    "id": user['id'],
+                    "username": user['username'],
+                    "email": user['email'],
+                    "created_at": user['created_at'],
+                    "last_login": user['last_login'],
+                    "stats": {
+                        "games_played": user['games_played'],
+                        "games_won": user['games_won'],
+                        "total_score": user['total_score']
+                    }
+                }
+                for user in users
+            ]
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get users: {str(e)}"
+        )
+    finally:
+        conn.close()
+
+@app.get("/api/users/me")
+async def get_current_user_info(current_user: Dict = Depends(get_current_user)):
+    """Get current authenticated user's information"""
+    user_info = get_user_by_id(current_user["user_id"])
+    
+    if not user_info:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    return {
+        "success": True,
+        "user": user_info
+    }
+
+@app.get("/api/users/{user_id}")
+async def get_user_by_id_endpoint(
+    user_id: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Get specific user by ID - Requires authentication"""
+    user_info = get_user_by_id(user_id)
+    
+    if not user_info:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    return {
+        "success": True,
+        "user": user_info
+    }
+
+@app.get("/api/users/username/{username}")
+async def get_user_by_username_endpoint(
+    username: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Get user by username - Requires authentication"""
+    user_info = get_user_by_username(username)
+    
+    if not user_info:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    return {
+        "success": True,
+        "user": user_info
+    }
+
+@app.get("/api/users/{user_id}/stats")
+async def get_user_statistics(
+    user_id: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Get comprehensive user statistics"""
+    stats = get_user_stats(user_id)
+    
+    if not stats:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    return {
+        "success": True,
+        "stats": stats
+    }
+
+@app.get("/api/users/me/stats")
+async def get_current_user_stats(current_user: Dict = Depends(get_current_user)):
+    """Get current user's statistics"""
+    stats = get_user_stats(current_user["user_id"])
+    
+    if not stats:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    return {
+        "success": True,
+        "stats": stats
+    }
+
+@app.put("/api/users/me")
+async def update_current_user(
+    update_data: UserUpdate,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Update current user's information"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        # Get current user from database
+        cursor.execute(
+            "SELECT email, password_hash FROM users WHERE id = ?",
+            (current_user["user_id"],)
+        )
+        user = cursor.fetchone()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        update_fields = []
+        update_values = []
+        
+        # Update email if provided
+        if update_data.email is not None:
+            # Validate email format
+            email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+            if not re.match(email_regex, update_data.email):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid email address"
+                )
+            
+            # Check if email already exists
+            cursor.execute(
+                "SELECT id FROM users WHERE email = ? AND id != ?",
+                (update_data.email, current_user["user_id"])
+            )
+            if cursor.fetchone():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Email already in use"
+                )
+            
+            update_fields.append("email = ?")
+            update_values.append(update_data.email)
+        
+        # Update password if provided
+        if update_data.new_password is not None:
+            if not update_data.current_password:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Current password is required to set new password"
+                )
+            
+            # Verify current password
+            if not verify_password(update_data.current_password, user['password_hash']):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Current password is incorrect"
+                )
+            
+            # Validate new password
+            if len(update_data.new_password) < 6:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="New password must be at least 6 characters"
+                )
+            
+            # Hash new password
+            new_password_hash = hash_password(update_data.new_password)
+            update_fields.append("password_hash = ?")
+            update_values.append(new_password_hash)
+        
+        # If no fields to update
+        if not update_fields:
+            return {
+                "success": True,
+                "message": "No changes to update"
+            }
+        
+        # Build and execute update query
+        update_values.append(current_user["user_id"])
+        update_query = f"UPDATE users SET {', '.join(update_fields)} WHERE id = ?"
+        
+        cursor.execute(update_query, update_values)
+        conn.commit()
+        
+        return {
+            "success": True,
+            "message": "User updated successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update user: {str(e)}"
+        )
+    finally:
+        conn.close()
+
+@app.delete("/api/users/me")
+async def delete_current_user(
+    current_user: Dict = Depends(get_current_user),
+    confirm_password: Optional[str] = Form(None)
+):
+    """Delete current user account"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        # Verify password for security
+        if not confirm_password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Password confirmation is required to delete account"
+            )
+        
+        # Get user's password hash
+        cursor.execute(
+            "SELECT password_hash FROM users WHERE id = ?",
+            (current_user["user_id"],)
+        )
+        user = cursor.fetchone()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Verify password
+        if not verify_password(confirm_password, user['password_hash']):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Password is incorrect"
+            )
+        
+        # Delete user (cascade will handle related records based on foreign keys)
+        cursor.execute("DELETE FROM users WHERE id = ?", (current_user["user_id"],))
+        conn.commit()
+        
+        return {
+            "success": True,
+            "message": "User account deleted successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user: {str(e)}"
+        )
+    finally:
+        conn.close()
 
 # Authentication Endpoints
 @app.post("/api/auth/register")
