@@ -1,20 +1,17 @@
-from fastapi import FastAPI, HTTPException, Depends, status,Query
+from fastapi import FastAPI, HTTPException, status, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, validator
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Optional, Dict, Any
 import uuid
 import json
 import random
-from passlib.context import CryptContext
 import sqlite3
 import os
 import csv
 import io
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi import UploadFile, File, Form
-import jwt
 import re
 
 # Initialize FastAPI
@@ -29,15 +26,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Security
-security = HTTPBearer()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# JWT Configuration
-SECRET_KEY = os.environ.get("SECRET_KEY", "tonk-game-secret-key-change-in-production")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_DAYS = 7  # Token expires in 7 days
-
 # Database setup
 DATABASE_FILE = "tonk_game.db"
 
@@ -46,12 +34,12 @@ def init_db():
     conn = sqlite3.connect(DATABASE_FILE)
     cursor = conn.cursor()
     
-    # Users table
+    # Users table (re-added for user management)
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         username TEXT UNIQUE NOT NULL,
-        email TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE,
         password_hash TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         last_login TIMESTAMP
@@ -64,22 +52,20 @@ def init_db():
         id TEXT PRIMARY KEY,
         room_code TEXT UNIQUE NOT NULL,
         game_name TEXT,
-        creator_id TEXT,
         game_status TEXT DEFAULT 'lobby',
         max_players INTEGER DEFAULT 4,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         started_at TIMESTAMP,
-        completed_at TIMESTAMP,
-        FOREIGN KEY (creator_id) REFERENCES users (id)
+        completed_at TIMESTAMP
     )
     ''')
     
-    # Players table (players in games)
+    # Game players table (stores user IDs in games)
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS game_players (
         id TEXT PRIMARY KEY,
         game_id TEXT NOT NULL,
-        user_id TEXT,
+        user_id TEXT NOT NULL,
         player_name TEXT NOT NULL,
         position INTEGER,
         is_computer BOOLEAN DEFAULT FALSE,
@@ -112,19 +98,11 @@ def init_db():
 # Initialize database on startup
 init_db()
 
-# Pydantic models with custom email validation
+# Pydantic models for user management
 class UserRegister(BaseModel):
     username: str
-    email: str
     password: str
-    
-    @validator('email')
-    def validate_email(cls, v):
-        """Simple email validation using regex"""
-        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
-        if not re.match(email_regex, v):
-            raise ValueError('Invalid email address')
-        return v
+    email: Optional[str] = None
     
     @validator('username')
     def validate_username(cls, v):
@@ -145,28 +123,30 @@ class UserRegister(BaseModel):
 class UserLogin(BaseModel):
     username: str
     password: str
-    
+
 class UserUpdate(BaseModel):
     email: Optional[str] = None
     current_password: Optional[str] = None
     new_password: Optional[str] = None
 
+# Pydantic models for game management
 class PlayerCreate(BaseModel):
     name: str
     is_computer: bool = False
+    user_id: Optional[str] = None  # User ID for human players
     position: Optional[int] = None
 
 class GameCreate(BaseModel):
     players: List[PlayerCreate]
     game_name: Optional[str] = None
-    userId: Optional[str] = None
 
 class GameJoin(BaseModel):
     playerName: str
-    userId: Optional[str] = None
+    user_id: str  # Required user ID for joining
 
 class MoveRequest(BaseModel):
-    playerId: str
+    player_id: str
+    user_id: str  # User ID for verification
     moveType: str
     moveData: Dict[str, Any] = {}
 
@@ -178,63 +158,22 @@ def get_db():
     return conn
 
 def hash_password(password: str) -> str:
-    """Hash a password"""
-    return pwd_context.hash(password)
+    """Hash a password using SHA-256 (simplified for this example)"""
+    import hashlib
+    return hashlib.sha256(password.encode()).hexdigest()
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password"""
-    return pwd_context.verify(plain_password, hashed_password)
+    import hashlib
+    return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
 
-def create_access_token(user_id: str, username: str) -> str:
-    """Create a JWT token"""
-    expire = datetime.utcnow() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
-    token_data = {
-        "sub": username,
-        "user_id": user_id,
-        "exp": expire,
-        "iat": datetime.utcnow()
-    }
-    token = jwt.encode(token_data, SECRET_KEY, algorithm=ALGORITHM)
-    return token
-
-def verify_token(token: str) -> Optional[Dict]:
-    """Verify a JWT token"""
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return {
-            "user_id": payload.get("user_id"),
-            "username": payload.get("sub"),
-            "exp": payload.get("exp")
-        }
-    except jwt.ExpiredSignatureError:
-        print(f"❌ Token expired")
-        return None
-    except jwt.InvalidTokenError as e:
-        print(f"❌ Invalid token: {e}")
-        return None
-    except Exception as e:
-        print(f"❌ Token verification error: {e}")
-        return None
-
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Get current user from token"""
-    token = credentials.credentials
-    user = verify_token(token)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired authentication token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return user
-    
 def get_user_by_id(user_id: str):
     """Get user by ID from database"""
     conn = get_db()
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "SELECT id, username, email, created_at, last_login, games_played, games_won, total_score FROM users WHERE id = ?",
+            "SELECT id, username, email, created_at, last_login FROM users WHERE id = ?",
             (user_id,)
         )
         user = cursor.fetchone()
@@ -248,7 +187,7 @@ def get_user_by_username(username: str):
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "SELECT id, username, email, created_at, last_login, games_played, games_won, total_score FROM users WHERE username = ?",
+            "SELECT id, username, email, created_at, last_login FROM users WHERE username = ?",
             (username,)
         )
         user = cursor.fetchone()
@@ -256,47 +195,33 @@ def get_user_by_username(username: str):
     finally:
         conn.close()
 
-def get_user_stats(user_id: str):
-    """Get comprehensive user statistics"""
+def verify_user_in_game(game_id: str, user_id: str) -> bool:
+    """Verify if a user is in a game"""
     conn = get_db()
     cursor = conn.cursor()
+    
     try:
-        # Get basic user info
         cursor.execute(
-            "SELECT username, games_played, games_won, total_score FROM users WHERE id = ?",
-            (user_id,)
+            "SELECT COUNT(*) as count FROM game_players WHERE game_id = ? AND user_id = ?",
+            (game_id, user_id)
         )
-        user = cursor.fetchone()
-        
-        if not user:
-            return None
-            
-        stats = dict(user)
-        
-        # Get recent games
+        result = cursor.fetchone()
+        return result['count'] > 0
+    finally:
+        conn.close()
+
+def verify_player_belongs_to_user(game_id: str, player_id: str, user_id: str) -> bool:
+    """Verify if a player belongs to a specific user"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
         cursor.execute(
-            """
-            SELECT g.id, g.room_code, g.game_name, g.game_status, g.created_at, 
-                   g.started_at, g.completed_at, g.winner_id,
-                   gp.score as player_score
-            FROM games g
-            JOIN game_players gp ON g.id = gp.game_id
-            WHERE gp.user_id = ?
-            ORDER BY g.created_at DESC
-            LIMIT 10
-            """,
-            (user_id,)
+            "SELECT user_id FROM game_players WHERE game_id = ? AND id = ?",
+            (game_id, player_id)
         )
-        recent_games = cursor.fetchall()
-        stats['recent_games'] = [dict(game) for game in recent_games]
-        
-        # Get win rate
-        if stats['games_played'] > 0:
-            stats['win_rate'] = (stats['games_won'] / stats['games_played']) * 100
-        else:
-            stats['win_rate'] = 0
-            
-        return stats
+        result = cursor.fetchone()
+        return result and result['user_id'] == user_id
     finally:
         conn.close()
 
@@ -350,8 +275,9 @@ def create_initial_game_state(game_id, room_code, players):
         game_players.append({
             'id': player['id'],
             'name': player['name'],
+            'user_id': player.get('user_id'),
             'hand': hands[i],
-            'is_computer': player['is_computer'],
+            'is_computer': player.get('is_computer', False),
             'is_current_turn': i == 0,  # First player starts
             'position': i,
             'points': 0,
@@ -418,34 +344,6 @@ def is_valid_spread(cards):
 def check_for_tonk(hand):
     """Check if player has Tonk (5 points or less)"""
     return calculate_hand_points(hand) <= 5
-
-def get_valid_moves(game_state, player_id):
-    """Determine valid moves for player"""
-    player = next((p for p in game_state['players'] if p['id'] == player_id), None)
-    if not player:
-        return []
-    
-    turn_phase = game_state.get('turn_phase', 'waiting')
-    current_player_idx = game_state.get('current_player_index', 0)
-    current_player = game_state['players'][current_player_idx] if game_state['players'] else None
-    
-    moves = []
-    
-    if player['id'] != current_player['id']:
-        return moves  # Not player's turn
-    
-    if turn_phase == 'draw':
-        moves.append('draw_from_deck')
-        if game_state['discard_pile']:
-            moves.append('draw_from_discard')
-    
-    elif turn_phase == 'play':
-        moves.append('discard')
-    
-    elif turn_phase == 'discard':
-        moves.append('discard')
-    
-    return moves
 
 # Database export/import functions
 def export_database():
@@ -554,11 +452,11 @@ def import_database(data):
             for game in data['games']:
                 cursor.execute(
                     """INSERT INTO games 
-                       (id, room_code, game_name, creator_id, game_status, 
+                       (id, room_code, game_name, game_status, 
                         max_players, created_at, started_at, completed_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (game['id'], game['room_code'], game['game_name'], 
-                     game['creator_id'], game['game_status'], game['max_players'],
+                     game['game_status'], game['max_players'],
                      game['created_at'], game['started_at'], game['completed_at'])
                 )
         
@@ -624,87 +522,129 @@ async def ping():
 async def api_ping():
     """API health check"""
     return await ping()
-    
-@app.get("/api/users")
-async def get_all_users(
-    current_user: Dict = Depends(get_current_user),
-    limit: int = Query(50, ge=1, le=100),
-    offset: int = Query(0, ge=0)
-):
-    """Get all users (paginated) - Requires authentication"""
+
+# ============ USER ENDPOINTS ============
+
+@app.post("/api/users/register")
+async def register(user_data: UserRegister):
+    """Register a new user"""
     conn = get_db()
     cursor = conn.cursor()
     
     try:
-        # Count total users
-        cursor.execute("SELECT COUNT(*) as total FROM users")
-        total = cursor.fetchone()['total']
+        print(f"📝 Registration attempt for: {user_data.username}")
         
-        # Get paginated users
+        # Check if user already exists
+        cursor.execute("SELECT id FROM users WHERE username = ?", 
+                      (user_data.username,))
+        existing_user = cursor.fetchone()
+        
+        if existing_user:
+            print(f"❌ User already exists: {user_data.username}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username already exists"
+            )
+        
+        # Create new user
+        user_id = str(uuid.uuid4())
+        password_hash = hash_password(user_data.password)
+        
+        print(f"✅ Creating user: {user_data.username} with ID: {user_id}")
+        
         cursor.execute(
-            """
-            SELECT id, username, email, created_at, last_login, 
-                   games_played, games_won, total_score
-            FROM users 
-            ORDER BY username
-            LIMIT ? OFFSET ?
-            """,
-            (limit, offset)
+            "INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, ?)",
+            (user_id, user_data.username, user_data.email, password_hash)
         )
-        users = cursor.fetchall()
+        
+        conn.commit()
+        
+        print(f"✅ Registration successful for: {user_data.username}")
         
         return {
             "success": True,
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-            "users": [
-                {
-                    "id": user['id'],
-                    "username": user['username'],
-                    "email": user['email'],
-                    "created_at": user['created_at'],
-                    "last_login": user['last_login'],
-                    "stats": {
-                        "games_played": user['games_played'],
-                        "games_won": user['games_won'],
-                        "total_score": user['total_score']
-                    }
-                }
-                for user in users
-            ]
+            "message": "Registration successful",
+            "user_id": user_id,
+            "username": user_data.username
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
+        conn.rollback()
+        print(f"❌ Registration error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get users: {str(e)}"
+            detail=f"Registration failed: {str(e)}"
         )
     finally:
         conn.close()
 
-@app.get("/api/users/me")
-async def get_current_user_info(current_user: Dict = Depends(get_current_user)):
-    """Get current authenticated user's information"""
-    user_info = get_user_by_id(current_user["user_id"])
+@app.post("/api/users/login")
+async def login(user_data: UserLogin):
+    """Login user"""
+    conn = get_db()
+    cursor = conn.cursor()
     
-    if not user_info:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+    try:
+        print(f"🔐 Login attempt for: {user_data.username}")
+        
+        # Find user by username
+        cursor.execute(
+            "SELECT id, username, password_hash FROM users WHERE username = ?",
+            (user_data.username,)
         )
-    
-    return {
-        "success": True,
-        "user": user_info
-    }
+        user = cursor.fetchone()
+        
+        if not user:
+            print(f"❌ User not found: {user_data.username}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid username or password"
+            )
+        
+        print(f"✅ User found: {user['username']}")
+        
+        # Verify password
+        if not verify_password(user_data.password, user['password_hash']):
+            print(f"❌ Password incorrect for user: {user_data.username}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid username or password"
+            )
+        
+        # Update last login
+        cursor.execute(
+            "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?",
+            (user['id'],)
+        )
+        
+        conn.commit()
+        
+        print(f"✅ Login successful for: {user['username']}")
+        
+        return {
+            "success": True,
+            "message": "Login successful",
+            "user_id": user['id'],
+            "username": user['username']
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        print(f"❌ Login error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Login failed: {str(e)}"
+        )
+    finally:
+        conn.close()
 
 @app.get("/api/users/{user_id}")
-async def get_user_by_id_endpoint(
-    user_id: str,
-    current_user: Dict = Depends(get_current_user)
-):
-    """Get specific user by ID - Requires authentication"""
+async def get_user_by_id_endpoint(user_id: str):
+    """Get specific user by ID"""
     user_info = get_user_by_id(user_id)
     
     if not user_info:
@@ -719,11 +659,8 @@ async def get_user_by_id_endpoint(
     }
 
 @app.get("/api/users/username/{username}")
-async def get_user_by_username_endpoint(
-    username: str,
-    current_user: Dict = Depends(get_current_user)
-):
-    """Get user by username - Requires authentication"""
+async def get_user_by_username_endpoint(username: str):
+    """Get user by username"""
     user_info = get_user_by_username(username)
     
     if not user_info:
@@ -737,47 +674,9 @@ async def get_user_by_username_endpoint(
         "user": user_info
     }
 
-@app.get("/api/users/{user_id}/stats")
-async def get_user_statistics(
-    user_id: str,
-    current_user: Dict = Depends(get_current_user)
-):
-    """Get comprehensive user statistics"""
-    stats = get_user_stats(user_id)
-    
-    if not stats:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
-    return {
-        "success": True,
-        "stats": stats
-    }
-
-@app.get("/api/users/me/stats")
-async def get_current_user_stats(current_user: Dict = Depends(get_current_user)):
-    """Get current user's statistics"""
-    stats = get_user_stats(current_user["user_id"])
-    
-    if not stats:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
-    return {
-        "success": True,
-        "stats": stats
-    }
-
-@app.put("/api/users/me")
-async def update_current_user(
-    update_data: UserUpdate,
-    current_user: Dict = Depends(get_current_user)
-):
-    """Update current user's information"""
+@app.put("/api/users/{user_id}")
+async def update_user(user_id: str, update_data: UserUpdate):
+    """Update user's information"""
     conn = get_db()
     cursor = conn.cursor()
     
@@ -785,7 +684,7 @@ async def update_current_user(
         # Get current user from database
         cursor.execute(
             "SELECT email, password_hash FROM users WHERE id = ?",
-            (current_user["user_id"],)
+            (user_id,)
         )
         user = cursor.fetchone()
         
@@ -811,7 +710,7 @@ async def update_current_user(
             # Check if email already exists
             cursor.execute(
                 "SELECT id FROM users WHERE email = ? AND id != ?",
-                (update_data.email, current_user["user_id"])
+                (update_data.email, user_id)
             )
             if cursor.fetchone():
                 raise HTTPException(
@@ -857,7 +756,7 @@ async def update_current_user(
             }
         
         # Build and execute update query
-        update_values.append(current_user["user_id"])
+        update_values.append(user_id)
         update_query = f"UPDATE users SET {', '.join(update_fields)} WHERE id = ?"
         
         cursor.execute(update_query, update_values)
@@ -879,296 +778,78 @@ async def update_current_user(
     finally:
         conn.close()
 
-@app.delete("/api/users/me")
-async def delete_current_user(
-    current_user: Dict = Depends(get_current_user),
-    confirm_password: Optional[str] = Form(None)
-):
-    """Delete current user account"""
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    try:
-        # Verify password for security
-        if not confirm_password:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Password confirmation is required to delete account"
-            )
-        
-        # Get user's password hash
-        cursor.execute(
-            "SELECT password_hash FROM users WHERE id = ?",
-            (current_user["user_id"],)
-        )
-        user = cursor.fetchone()
-        
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
-        
-        # Verify password
-        if not verify_password(confirm_password, user['password_hash']):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Password is incorrect"
-            )
-        
-        # Delete user (cascade will handle related records based on foreign keys)
-        cursor.execute("DELETE FROM users WHERE id = ?", (current_user["user_id"],))
-        conn.commit()
-        
-        return {
-            "success": True,
-            "message": "User account deleted successfully"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete user: {str(e)}"
-        )
-    finally:
-        conn.close()
+# ============ GAME ENDPOINTS ============
 
-# Authentication Endpoints
-@app.post("/api/auth/register")
-async def register(user_data: UserRegister):
-    """Register a new user"""
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    try:
-        print(f"📝 Registration attempt for: {user_data.username}")
-        
-        # Check if user already exists
-        cursor.execute("SELECT id FROM users WHERE username = ? OR email = ?", 
-                      (user_data.username, user_data.email))
-        existing_user = cursor.fetchone()
-        
-        if existing_user:
-            print(f"❌ User already exists: {user_data.username}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Username or email already exists"
-            )
-        
-        # Create new user
-        user_id = str(uuid.uuid4())
-        password_hash = hash_password(user_data.password)
-        
-        print(f"✅ Creating user: {user_data.username} with ID: {user_id}")
-        
-        cursor.execute(
-            "INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, ?)",
-            (user_id, user_data.username, user_data.email, password_hash)
-        )
-        
-        # Create token
-        access_token = create_access_token(user_id, user_data.username)
-        
-        conn.commit()
-        
-        print(f"✅ Registration successful for: {user_data.username}")
-        
-        return {
-            "success": True,
-            "message": "Registration successful",
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user_id": user_id,
-            "username": user_data.username,
-            "expires_in": f"{ACCESS_TOKEN_EXPIRE_DAYS} days"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        conn.rollback()
-        print(f"❌ Registration error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Registration failed: {str(e)}"
-        )
-    finally:
-        conn.close()
-
-@app.post("/api/auth/login")
-async def login(user_data: UserLogin):
-    """Login user"""
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    try:
-        print(f"🔐 Login attempt for: {user_data.username}")
-        
-        # Find user by username
-        cursor.execute(
-            "SELECT id, username, password_hash FROM users WHERE username = ?",
-            (user_data.username,)
-        )
-        user = cursor.fetchone()
-        
-        if not user:
-            print(f"❌ User not found: {user_data.username}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid username or password"
-            )
-        
-        print(f"✅ User found: {user['username']}")
-        
-        # Verify password
-        if not verify_password(user_data.password, user['password_hash']):
-            print(f"❌ Password incorrect for user: {user_data.username}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid username or password"
-            )
-        
-        # Update last login
-        cursor.execute(
-            "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?",
-            (user['id'],)
-        )
-        
-        # Create token
-        access_token = create_access_token(user['id'], user['username'])
-        
-        conn.commit()
-        
-        print(f"✅ Login successful for: {user['username']}")
-        
-        return {
-            "success": True,
-            "message": "Login successful",
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user_id": user['id'],
-            "username": user['username'],
-            "expires_in": f"{ACCESS_TOKEN_EXPIRE_DAYS} days"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        conn.rollback()
-        print(f"❌ Login error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Login failed: {str(e)}"
-        )
-    finally:
-        conn.close()
-
-@app.get("/api/auth/validate-token")
-async def validate_token(current_user: Dict = Depends(get_current_user)):
-    """Validate token"""
-    return {
-        "valid": True,
-        "user_id": current_user["user_id"],
-        "username": current_user["username"]
-    }
-
-@app.get("/api/auth/profile")
-async def get_user_profile(current_user: Dict = Depends(get_current_user)):
-    """Get user profile"""
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    try:
-        cursor.execute(
-            "SELECT id, username, email, created_at, last_login FROM users WHERE id = ?",
-            (current_user["user_id"],)
-        )
-        user = cursor.fetchone()
-        
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
-        
-        return {
-            "success": True,
-            "profile": {
-                "id": user['id'],
-                "username": user['username'],
-                "email": user['email'],
-                "created_at": user['created_at'],
-                "last_login": user['last_login']
-            }
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get profile: {str(e)}"
-        )
-    finally:
-        conn.close()
-
-# Game Endpoints
 @app.post("/api/game/create")
-async def create_game(game_data: GameCreate, current_user: Dict = Depends(get_current_user)):
-    """Create a new game (requires authentication)"""
+async def create_game(game_data: GameCreate, user_id: str = Query(...)):
+    """Create a new game (requires user ID)"""
     conn = get_db()
     cursor = conn.cursor()
     
     try:
-        print(f"🎮 Creating game for user: {current_user['username']}")
+        print(f"🎮 Creating game for user: {user_id}")
+        
+        # Verify user exists
+        cursor.execute("SELECT id, username FROM users WHERE id = ?", (user_id,))
+        user = cursor.fetchone()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        print(f"✅ User verified: {user['username']}")
         
         # Generate game ID and room code
         game_id = str(uuid.uuid4())
-        
-        # Generate a 6-character room code without confusing characters
         room_code = ''.join(random.choices('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', k=6))
         
         print(f"🎮 Generated game_id: {game_id}, room_code: {room_code}")
         
-        # Create game record - use current_user's ID as creator
+        # Create game record
         cursor.execute(
-            """INSERT INTO games (id, room_code, game_name, creator_id, game_status) 
-               VALUES (?, ?, ?, ?, ?)""",
-            (game_id, room_code, game_data.game_name, current_user['user_id'], 'lobby')
+            """INSERT INTO games (id, room_code, game_name, game_status) 
+               VALUES (?, ?, ?, ?)""",
+            (game_id, room_code, game_data.game_name, 'lobby')
         )
         
-        # Add players to game
+        # Add players to game_players table
         player_ids = []
+        players_for_state = []
+        
         for i, player in enumerate(game_data.players):
             player_id = str(uuid.uuid4())
             player_ids.append(player_id)
             
-            # Get user ID for human player (first non-computer)
-            user_id_for_player = None
+            # For human player (first non-computer), use the provided user_id
+            player_user_id = None
             if i == 0 and not player.is_computer:
-                user_id_for_player = current_user['user_id']
+                player_user_id = user_id
+            elif player.user_id and not player.is_computer:
+                player_user_id = player.user_id
+            elif player.is_computer:
+                player_user_id = None  # Computers don't have user IDs
             
+            # Add to game_players table
             cursor.execute(
                 """INSERT INTO game_players 
                    (id, game_id, user_id, player_name, position, is_computer, is_host, is_ready) 
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (player_id, game_id, user_id_for_player,
+                (player_id, game_id, player_user_id,
                  player.name, i, player.is_computer, i == 0, True)
             )
-        
-        # Create initial game state
-        players_for_state = []
-        for i, (player, player_id) in enumerate(zip(game_data.players, player_ids)):
+            
+            # Prepare for game state
             players_for_state.append({
                 'id': player_id,
                 'name': player.name,
+                'user_id': player_user_id,
                 'is_computer': player.is_computer,
                 'position': i
             })
         
+        # Create initial game state
         game_state = create_initial_game_state(game_id, room_code, players_for_state)
         
         # Save game state
@@ -1180,7 +861,7 @@ async def create_game(game_data: GameCreate, current_user: Dict = Depends(get_cu
         
         conn.commit()
         
-        # Return human player's ID (first non-computer player)
+        # Return human player's ID
         human_player_id = None
         for i, (player, pid) in enumerate(zip(game_data.players, player_ids)):
             if not player.is_computer:
@@ -1195,12 +876,14 @@ async def create_game(game_data: GameCreate, current_user: Dict = Depends(get_cu
         return {
             "success": True,
             "message": "Game created successfully",
-            "gameId": game_id,
-            "roomCode": room_code,
-            "playerId": human_player_id,
-            "gameState": game_state
+            "game_id": game_id,
+            "room_code": room_code,
+            "player_id": human_player_id,
+            "game_state": game_state
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         conn.rollback()
         print(f"❌ Error creating game: {str(e)}")
@@ -1215,13 +898,25 @@ async def create_game(game_data: GameCreate, current_user: Dict = Depends(get_cu
         conn.close()
 
 @app.post("/api/game/{room_code}/join")
-async def join_game(room_code: str, join_data: GameJoin, current_user: Dict = Depends(get_current_user)):
-    """Join an existing game (requires authentication)"""
+async def join_game(room_code: str, join_data: GameJoin):
+    """Join an existing game (requires user ID)"""
     conn = get_db()
     cursor = conn.cursor()
     
     try:
-        print(f"🎮 Join attempt for room: {room_code} by user: {current_user['username']}")
+        print(f"🎮 Join attempt for room: {room_code} by user: {join_data.user_id}")
+        
+        # Verify user exists
+        cursor.execute("SELECT id, username FROM users WHERE id = ?", (join_data.user_id,))
+        user = cursor.fetchone()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        print(f"✅ User verified: {user['username']}")
         
         # Find game by room code
         cursor.execute(
@@ -1255,7 +950,20 @@ async def join_game(room_code: str, join_data: GameJoin, current_user: Dict = De
                 detail="Game is full"
             )
         
-        # Add player to game
+        # Check if user is already in the game
+        cursor.execute(
+            "SELECT id FROM game_players WHERE game_id = ? AND user_id = ?",
+            (game['id'], join_data.user_id)
+        )
+        existing_player = cursor.fetchone()
+        
+        if existing_player:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="You are already in this game"
+            )
+        
+        # Add player to game_players table
         player_id = str(uuid.uuid4())
         position = player_count
         
@@ -1263,18 +971,17 @@ async def join_game(room_code: str, join_data: GameJoin, current_user: Dict = De
             """INSERT INTO game_players 
                (id, game_id, user_id, player_name, position, is_computer, is_host, is_ready) 
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (player_id, game['id'], current_user['user_id'], join_data.playerName, 
+            (player_id, game['id'], join_data.user_id, join_data.playerName, 
              position, False, False, True)
         )
         
-        # Get updated game state
+        # Get and update game state
         cursor.execute(
             "SELECT state_json FROM game_states WHERE game_id = ?",
             (game['id'],)
         )
         state_record = cursor.fetchone()
         
-        game_state = None
         if state_record:
             game_state = json.loads(state_record['state_json'])
             
@@ -1282,6 +989,7 @@ async def join_game(room_code: str, join_data: GameJoin, current_user: Dict = De
             game_state['players'].append({
                 'id': player_id,
                 'name': join_data.playerName,
+                'user_id': join_data.user_id,
                 'hand': [],
                 'is_computer': False,
                 'is_current_turn': False,
@@ -1304,6 +1012,7 @@ async def join_game(room_code: str, join_data: GameJoin, current_user: Dict = De
                 'players': [{
                     'id': player_id,
                     'name': join_data.playerName,
+                    'user_id': join_data.user_id,
                     'hand': [],
                     'is_computer': False,
                     'is_current_turn': False,
@@ -1312,17 +1021,23 @@ async def join_game(room_code: str, join_data: GameJoin, current_user: Dict = De
                     'is_ready': True
                 }]
             }
+            
+            state_id = str(uuid.uuid4())
+            cursor.execute(
+                "INSERT INTO game_states (id, game_id, state_json) VALUES (?, ?, ?)",
+                (state_id, game['id'], json.dumps(game_state))
+            )
         
         conn.commit()
         
-        print(f"✅ User {current_user['username']} joined game {room_code}")
+        print(f"✅ User {user['username']} joined game {room_code}")
         
         return {
             "success": True,
             "message": "Joined game successfully",
-            "gameId": game['id'],
-            "playerId": player_id,
-            "gameState": game_state
+            "game_id": game['id'],
+            "player_id": player_id,
+            "game_state": game_state
         }
         
     except HTTPException:
@@ -1397,7 +1112,7 @@ async def get_game_state(identifier: str):
         
         return {
             "success": True,
-            "gameState": game_state
+            "game_state": game_state
         }
         
     except HTTPException:
@@ -1406,6 +1121,82 @@ async def get_game_state(identifier: str):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get game state: {str(e)}"
+        )
+    finally:
+        conn.close()
+
+@app.get("/api/game/{identifier}/state/private")
+async def get_private_game_state(identifier: str, user_id: str = Query(...)):
+    """Get game state with user-specific data (hides other players' cards)"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        # Try to find game by ID or room code
+        cursor.execute(
+            """SELECT g.id, g.room_code, g.game_status, gs.state_json 
+               FROM games g 
+               LEFT JOIN game_states gs ON g.id = gs.game_id 
+               WHERE g.id = ? OR g.room_code = ?""",
+            (identifier, identifier.upper())
+        )
+        result = cursor.fetchone()
+        
+        if not result:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Game not found"
+            )
+        
+        # Check if user is in the game
+        cursor.execute(
+            "SELECT id FROM game_players WHERE game_id = ? AND user_id = ?",
+            (result['id'], user_id)
+        )
+        player_in_game = cursor.fetchone()
+        
+        if not player_in_game:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User not in this game"
+            )
+        
+        if result['state_json']:
+            game_state = json.loads(result['state_json'])
+            
+            # Filter sensitive information based on user
+            filtered_state = game_state.copy()
+            
+            # Only show current user's hand fully
+            for player in filtered_state.get('players', []):
+                if player.get('user_id') != user_id:
+                    # Hide other players' cards, just show count
+                    player['hand'] = [{'id': 'hidden', 'count': len(player.get('hand', []))}]
+            
+            return {
+                "success": True,
+                "game_state": filtered_state
+            }
+        else:
+            # Create basic state if none exists
+            game_state = {
+                'id': result['id'],
+                'room_code': result['room_code'],
+                'game_status': result['game_status'],
+                'players': []
+            }
+            
+            return {
+                "success": True,
+                "game_state": game_state
+            }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get private game state: {str(e)}"
         )
     finally:
         conn.close()
@@ -1420,7 +1211,7 @@ async def get_lobby_state(identifier: str):
         # Try to find game by ID or room code
         cursor.execute(
             """SELECT g.id, g.room_code, g.game_name, g.game_status, g.max_players, 
-                      g.creator_id, g.created_at 
+                      g.created_at 
                FROM games g 
                WHERE g.id = ? OR g.room_code = ?""",
             (identifier, identifier.upper())
@@ -1433,13 +1224,15 @@ async def get_lobby_state(identifier: str):
                 detail="Game not found"
             )
         
-        # Get players
+        # Get players with their user info
         cursor.execute(
-            """SELECT id, player_name, position, is_computer, is_ready, is_host, 
-                      joined_at 
-               FROM game_players 
-               WHERE game_id = ? 
-               ORDER BY position""",
+            """SELECT gp.id, gp.player_name, gp.position, gp.is_computer, 
+                      gp.is_ready, gp.is_host, gp.joined_at, gp.user_id,
+                      u.username
+               FROM game_players gp
+               LEFT JOIN users u ON gp.user_id = u.id
+               WHERE gp.game_id = ? 
+               ORDER BY gp.position""",
             (game['id'],)
         )
         players_data = cursor.fetchall()
@@ -1453,18 +1246,19 @@ async def get_lobby_state(identifier: str):
                 'is_computer': bool(player['is_computer']),
                 'is_ready': bool(player['is_ready']),
                 'is_host': bool(player['is_host']),
-                'joined_at': player['joined_at']
+                'joined_at': player['joined_at'],
+                'user_id': player['user_id'],
+                'username': player['username']
             })
         
         return {
             "success": True,
-            "gameState": {
+            "game_state": {
                 'id': game['id'],
                 'room_code': game['room_code'],
                 'game_name': game['game_name'],
                 'game_status': game['game_status'],
                 'max_players': game['max_players'],
-                'creator_id': game['creator_id'],
                 'created_at': game['created_at'],
                 'players': players,
                 'player_count': len(players),
@@ -1483,13 +1277,13 @@ async def get_lobby_state(identifier: str):
         conn.close()
 
 @app.post("/api/game/{identifier}/start")
-async def start_game(identifier: str, current_user: Dict = Depends(get_current_user)):
-    """Start a game (requires authentication and host status)"""
+async def start_game(identifier: str, user_id: str = Query(...)):
+    """Start a game (requires user to be in the game and be host)"""
     conn = get_db()
     cursor = conn.cursor()
     
     try:
-        print(f"🎮 Start game request for: {identifier} by user: {current_user['username']}")
+        print(f"🎮 Start game request for: {identifier} by user: {user_id}")
         
         # Find game
         cursor.execute(
@@ -1510,16 +1304,22 @@ async def start_game(identifier: str, current_user: Dict = Depends(get_current_u
                 detail="Game has already started"
             )
         
-        # Check if user is host
+        # Check if user is in the game and is host
         cursor.execute(
             """SELECT is_host FROM game_players 
                WHERE game_id = ? AND user_id = ?""",
-            (game['id'], current_user['user_id'])
+            (game['id'], user_id)
         )
         player = cursor.fetchone()
         
-        if not player or not player['is_host']:
-            print(f"❌ User {current_user['username']} is not the host")
+        if not player:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User not in this game"
+            )
+        
+        if not player['is_host']:
+            print(f"❌ User {user_id} is not the host")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only the host can start the game"
@@ -1585,7 +1385,7 @@ async def start_game(identifier: str, current_user: Dict = Depends(get_current_u
         return {
             "success": True,
             "message": "Game started successfully",
-            "gameState": game_state
+            "game_state": game_state
         }
         
     except HTTPException:
@@ -1607,6 +1407,20 @@ async def make_move(game_id: str, move_request: MoveRequest):
     cursor = conn.cursor()
     
     try:
+        # Verify user is in the game
+        if not verify_user_in_game(game_id, move_request.user_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User not in this game"
+            )
+        
+        # Verify player belongs to user
+        if not verify_player_belongs_to_user(game_id, move_request.player_id, move_request.user_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Player does not belong to user"
+            )
+        
         # Verify game exists and is playing
         cursor.execute(
             "SELECT game_status FROM games WHERE id = ?",
@@ -1642,18 +1456,18 @@ async def make_move(game_id: str, move_request: MoveRequest):
         game_state = json.loads(state_record['state_json'])
         
         # Update game state based on move
-        # This is a simplified move handler - you'll need to implement actual game logic
         move_result = {
             'success': True,
             'message': f"Move {move_request.moveType} processed",
-            'gameState': game_state  # Return updated state
+            'game_state': game_state
         }
         
         # Update last move
         game_state['last_move'] = {
-            'playerId': move_request.playerId,
-            'moveType': move_request.moveType,
-            'moveData': move_request.moveData,
+            'player_id': move_request.player_id,
+            'user_id': move_request.user_id,
+            'move_type': move_request.moveType,
+            'move_data': move_request.moveData,
             'timestamp': datetime.utcnow().isoformat()
         }
         
@@ -1685,6 +1499,20 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
     cursor = conn.cursor()
     
     try:
+        # Verify user is in the game
+        if not verify_user_in_game(game_id, move_request.user_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User not in this game"
+            )
+        
+        # Verify player belongs to user
+        if not verify_player_belongs_to_user(game_id, move_request.player_id, move_request.user_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Player does not belong to user"
+            )
+        
         # Get game and state
         cursor.execute(
             "SELECT game_status FROM games WHERE id = ?",
@@ -1713,17 +1541,17 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
         current_player_idx = game_state.get('current_player_index', 0)
         current_player = game_state['players'][current_player_idx] if game_state['players'] else None
         
-        if not current_player or current_player['id'] != move_request.playerId:
+        if not current_player or current_player['id'] != move_request.player_id:
             raise HTTPException(status_code=400, detail="Not player's turn")
         
         # Process move based on type
         move_result = {
             'success': False,
             'message': '',
-            'gameState': game_state
+            'game_state': game_state
         }
         
-        player = next((p for p in game_state['players'] if p['id'] == move_request.playerId), None)
+        player = next((p for p in game_state['players'] if p['id'] == move_request.player_id), None)
         
         if move_request.moveType == 'draw_from_deck':
             if game_state['deck']:
@@ -1806,7 +1634,8 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
             game_state['table_spreads'].append({
                 'id': f"spread_{len(game_state['table_spreads'])}",
                 'cards': spread_cards_objects,
-                'player': player['name']
+                'player': player['name'],
+                'player_id': player['id']
             })
             
             move_result['success'] = True
@@ -1814,10 +1643,11 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
         
         # Update last move
         game_state['last_move'] = {
-            'playerId': move_request.playerId,
-            'playerName': player['name'],
-            'moveType': move_request.moveType,
-            'moveData': move_request.moveData,
+            'player_id': move_request.player_id,
+            'user_id': move_request.user_id,
+            'player_name': player['name'],
+            'move_type': move_request.moveType,
+            'move_data': move_request.moveData,
             'timestamp': datetime.utcnow().isoformat()
         }
         
@@ -1836,7 +1666,7 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
         
         conn.commit()
         
-        move_result['gameState'] = game_state
+        move_result['game_state'] = game_state
         move_result['success'] = True
         
         return move_result
@@ -1851,17 +1681,6 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
         )
     finally:
         conn.close()
-
-@app.post("/api/game/{game_id}/ai-move")
-async def ai_move(game_id: str):
-    """Trigger AI move"""
-    # This would handle AI player moves
-    # For now, just return success
-    return {
-        "success": True,
-        "message": "AI move will be processed",
-        "timestamp": datetime.utcnow().isoformat()
-    }
 
 @app.get("/api/game/room/{room_code}/id")
 async def get_game_id(room_code: str):
@@ -1884,7 +1703,7 @@ async def get_game_id(room_code: str):
         
         return {
             "success": True,
-            "gameId": game['id']
+            "game_id": game['id']
         }
         
     except HTTPException:
@@ -1897,11 +1716,11 @@ async def get_game_id(room_code: str):
     finally:
         conn.close()
 
-# Admin Endpoints
+# ============ ADMIN ENDPOINTS ============
+
 @app.get("/api/admin/export/json")
 async def export_database_json(admin_token: str = Form(...)):
     """Export entire database as JSON (protected)"""
-    # Simple admin token check (in production, use proper auth)
     if admin_token != "tonk_admin_123":
         raise HTTPException(status_code=403, detail="Invalid admin token")
     
@@ -1982,5 +1801,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"🚀 Starting Tonk API server on port {port}")
     print(f"📁 Database file: {DATABASE_FILE}")
-    print(f"🔑 JWT Algorithm: {ALGORITHM}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
