@@ -37,6 +37,50 @@ game_manager = GameManager()
 # Database setup
 DATABASE_FILE = "tonk_game.db"
 
+# app.py - Add this RIGHT AFTER the CORS middleware setup
+import time
+
+@app.middleware("http")
+async def log_all_requests(request: Request, call_next):
+    """Log ALL incoming requests"""
+    start_time = time.time()
+    
+    # Get request details
+    method = request.method
+    url = str(request.url)
+    client = request.client.host if request.client else "unknown"
+    
+    print(f"🌐 [{datetime.utcnow()}] REQUEST START: {method} {url}")
+    print(f"   Client: {client}")
+    print(f"   Headers: {dict(request.headers)}")
+    
+    # Check body for non-GET requests
+    if method in ["POST", "PUT", "PATCH"]:
+        try:
+            # Peek at the body without consuming it
+            body_bytes = await request.body()
+            if body_bytes:
+                body_str = body_bytes.decode('utf-8')
+                print(f"   Body preview (first 500 chars): {body_str[:500]}")
+            else:
+                print(f"   Body: (empty)")
+            
+            # Reset the body so it can be read again
+            async def receive():
+                return {"type": "http.request", "body": body_bytes}
+            request._receive = receive
+        except Exception as e:
+            print(f"   Error reading body: {e}")
+    
+    # Process the request
+    response = await call_next(request)
+    
+    # Log response
+    duration = time.time() - start_time
+    print(f"📤 [{datetime.utcnow()}] RESPONSE: {method} {url} -> {response.status_code} ({duration:.3f}s)")
+    
+    return response
+
 def get_db():
     """Get database connection - USING SHARED DATABASE MANAGER"""
     from database import db
