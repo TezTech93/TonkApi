@@ -1,16 +1,8 @@
-# auth_manager.py - USE BCRYPT DIRECTLY
 import uuid
-import bcrypt  # ADD THIS IMPORT
-from datetime import datetime, timedelta
+import bcrypt
+from datetime import datetime
 from typing import Optional, Dict
-from jose import JWTError, jwt
 from database import db
-
-SECRET_KEY = "your-secret-key-change-in-production"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-# REMOVE: pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 class AuthManager:
     def __init__(self):
@@ -21,7 +13,6 @@ class AuthManager:
     
     def hash_password(self, password: str) -> str:
         """Hash a password for storing - USING DIRECT BCRYPT"""
-        # Bcrypt can handle any length password - it hashes internally
         salt = bcrypt.gensalt()
         hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
         return hashed.decode('utf-8')
@@ -32,20 +23,6 @@ class AuthManager:
             return bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8'))
         except Exception:
             return False
-    
-    def create_token(self, username: str) -> str:
-        """Create JWT token"""
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        payload = {"sub": username, "exp": expire}
-        return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-    
-    def decode_token(self, token: str) -> Optional[Dict]:
-        """Decode and validate JWT token"""
-        try:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-            return payload
-        except JWTError:
-            return None
     
     def create_user(self, username: str, email: str, password: str) -> Dict:
         """Create a new user"""
@@ -69,29 +46,27 @@ class AuthManager:
             
             # Create user
             user_id = str(uuid.uuid4())
-            hashed_password = self.hash_password(password)
+            password_hash = self.hash_password(password)
             created_at = datetime.now().isoformat()
             
             cursor.execute('''
                 INSERT INTO users 
-                (id, username, email, hashed_password, created_at, online, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (id, username, email, password_hash, created_at, last_login)
+                VALUES (?, ?, ?, ?, ?, ?)
             ''', (
-                user_id, username, email, hashed_password, 
-                created_at, 1, created_at
+                user_id, username, email, password_hash, 
+                created_at, created_at
             ))
             
             conn.commit()
             conn.close()
             
-            # Create token
-            token = self.create_token(username)
-            
             return {
-                "id": user_id,
+                "success": True,
+                "user_id": user_id,
                 "username": username,
                 "email": email,
-                "token": token
+                "message": "User created successfully"
             }
             
         except Exception as e:
@@ -113,58 +88,67 @@ class AuthManager:
                 conn.close()
                 return None
             
-            if not self.verify_password(password, user['hashed_password']):
+            if not self.verify_password(password, user['password_hash']):
                 conn.close()
                 return None
             
-            # Update last seen
+            # Update last login
             cursor.execute(
-                "UPDATE users SET last_seen = ?, online = 1 WHERE id = ?",
+                "UPDATE users SET last_login = ? WHERE id = ?",
                 (datetime.now().isoformat(), user['id'])
             )
             conn.commit()
             conn.close()
             
-            # Create token
-            token = self.create_token(username)
-            
             return {
-                "id": user['id'],
+                "success": True,
+                "user_id": user['id'],
                 "username": user['username'],
                 "email": user['email'],
-                "token": token
+                "message": "Login successful"
             }
             
         except Exception as e:
             conn.close()
             raise e
     
-    def validate_token(self, token: str) -> Optional[Dict]:
-        """Validate token and return user"""
-        payload = self.decode_token(token)
-        if not payload:
-            return None
-        
-        username = payload.get("sub")
-        if not username:
-            return None
-        
+    def get_user_by_id(self, user_id: str) -> Optional[Dict]:
+        """Get user by ID"""
         self._ensure_db()
+        
         conn = db.get_connection()
         cursor = conn.cursor()
         
         try:
-            cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+            cursor.execute("SELECT id, username, email, created_at, last_login FROM users WHERE id = ?", (user_id,))
             user = cursor.fetchone()
             conn.close()
             
             if not user:
                 return None
             
-            return {
-                "id": user['id'],
-                "username": user['username']
-            }
+            return dict(user)
+            
+        except Exception:
+            conn.close()
+            return None
+    
+    def get_user_by_username(self, username: str) -> Optional[Dict]:
+        """Get user by username"""
+        self._ensure_db()
+        
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("SELECT id, username, email, created_at, last_login FROM users WHERE username = ?", (username,))
+            user = cursor.fetchone()
+            conn.close()
+            
+            if not user:
+                return None
+            
+            return dict(user)
             
         except Exception:
             conn.close()
