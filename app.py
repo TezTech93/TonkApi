@@ -38,79 +38,9 @@ game_manager = GameManager()
 DATABASE_FILE = "tonk_game.db"
 
 def get_db():
-    """Get database connection"""
-    conn = sqlite3.connect(DATABASE_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def init_db():
-    """Initialize database tables"""
-    conn = sqlite3.connect(DATABASE_FILE)
-    cursor = conn.cursor()
-    
-    # Users table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        username TEXT UNIQUE NOT NULL,
-        email TEXT UNIQUE,
-        password_hash TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_login TIMESTAMP
-    )
-    ''')
-    
-    # Games table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS games (
-        id TEXT PRIMARY KEY,
-        room_code TEXT UNIQUE NOT NULL,
-        game_name TEXT,
-        game_status TEXT DEFAULT 'lobby',
-        max_players INTEGER DEFAULT 4,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        started_at TIMESTAMP,
-        completed_at TIMESTAMP
-    )
-    ''')
-    
-    # Game players table (stores user IDs in games)
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS game_players (
-        id TEXT PRIMARY KEY,
-        game_id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        player_name TEXT NOT NULL,
-        position INTEGER,
-        is_computer BOOLEAN DEFAULT FALSE,
-        is_ready BOOLEAN DEFAULT FALSE,
-        is_host BOOLEAN DEFAULT FALSE,
-        joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        left_at TIMESTAMP,
-        FOREIGN KEY (game_id) REFERENCES games (id),
-        FOREIGN KEY (user_id) REFERENCES users (id)
-    )
-    ''')
-    
-    # Game states table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS game_states (
-        id TEXT PRIMARY KEY,
-        game_id TEXT UNIQUE NOT NULL,
-        state_json TEXT NOT NULL,
-        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        turn_count INTEGER DEFAULT 0,
-        current_player_index INTEGER DEFAULT 0,
-        turn_phase TEXT DEFAULT 'waiting',
-        FOREIGN KEY (game_id) REFERENCES games (id)
-    )
-    ''')
-    
-    conn.commit()
-    conn.close()
-
-# Initialize database on startup
-init_db()
+    """Get database connection - USING SHARED DATABASE MANAGER"""
+    from database import db
+    return db.get_connection()
 
 # Pydantic models for user management
 class UserRegister(BaseModel):
@@ -203,8 +133,8 @@ def export_database():
     
     data = {}
     
-    # Export users
-    cursor.execute("SELECT * FROM users")
+    # Export users - UPDATED COLUMN NAME
+    cursor.execute("SELECT id, username, email, password_hash, created_at, last_login FROM users")
     users = [dict(row) for row in cursor.fetchall()]
     data['users'] = users
     
@@ -286,7 +216,7 @@ def import_database(data):
         cursor.execute("DELETE FROM games")
         cursor.execute("DELETE FROM users")
         
-        # Import users
+        # Import users - UPDATED COLUMN NAME
         if 'users' in data:
             for user in data['users']:
                 cursor.execute(
