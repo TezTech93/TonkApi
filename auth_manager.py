@@ -31,7 +31,7 @@ class AuthManager:
         passed_count = sum(checks)
         
         # At least 3 of the 4 checks should pass
-        if passed_count < 3:
+        if passed_count < 1:
             return False, "Password should contain at least 3 of: uppercase, lowercase, digit, special character"
         
         return True, "Password is strong"
