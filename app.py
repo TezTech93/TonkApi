@@ -307,7 +307,12 @@ async def api_ping():
 
 @app.post("/api/users/register")
 async def register(user_data: UserRegister):
-    """Register a new user - USING AUTH MANAGER"""
+    print(f"🔍 DEBUG REGISTER ENDPOINT:")
+    print(f"  Raw user_data: {user_data}")
+    print(f"  username: {user_data.username}")
+    print(f"  password: {user_data.password}")
+    print(f"  email: {user_data.email}")
+    print(f"  email type: {type(user_data.email)}")
     try:
         result = auth_manager.create_user(
             username=user_data.username,
@@ -324,6 +329,8 @@ async def register(user_data: UserRegister):
 @app.post("/api/users/login")
 async def login(user_data: UserLogin):
     """Login user - USING AUTH MANAGER"""
+    print(f"  username: {user_data.username}")
+    print(f"  password: {user_data.password}")
     try:
         result = auth_manager.authenticate_user(
             username=user_data.username,
