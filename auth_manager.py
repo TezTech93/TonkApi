@@ -20,13 +20,18 @@ class AuthManager:
             return False, f"Password must be at least {self.min_password_length} characters"
         
         # Check for complexity
-        has_upper = any(c.isupper() for c in password)
-        has_lower = any(c.islower() for c in password)
-        has_digit = any(c.isdigit() for c in password)
-        has_special = any(not c.isalnum() for c in password)
+        checks = [
+            any(c.isupper() for c in password),  # uppercase
+            any(c.islower() for c in password),  # lowercase  
+            any(c.isdigit() for c in password),  # digit
+            any(not c.isalnum() for c in password)  # special
+        ]
         
-        score = sum([has_upper, has_lower, has_digit, has_special])
-        if score < 3:
+        # Count how many checks passed
+        passed_count = sum(checks)
+        
+        # At least 3 of the 4 checks should pass
+        if passed_count < 3:
             return False, "Password should contain at least 3 of: uppercase, lowercase, digit, special character"
         
         return True, "Password is strong"
