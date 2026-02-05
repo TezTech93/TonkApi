@@ -1,4 +1,4 @@
-# auth_manager.py - UPDATED WITH ENHANCED SECURITY
+# auth_manager.py - CORRECTED VERSION
 import uuid
 import bcrypt
 import re
@@ -8,33 +8,38 @@ from database import db
 
 class AuthManager:
     def __init__(self):
-        self.min_password_length = 8
+        self.min_password_length = 6  # Reduced from 8 to match frontend
         self.work_factor = 12  # BCrypt work factor
     
     def _ensure_db(self):
         db.ensure_tables_exist()
     
-    def _validate_password_strength(self, password: str) -> bool:
-        """Validate password meets security requirements"""
+    def _validate_password_strength(self, password: str) -> (bool, str):
+        """Validate password - SIMPLIFIED FOR EXPO APP"""
+        # Check minimum length
         if len(password) < self.min_password_length:
             return False, f"Password must be at least {self.min_password_length} characters"
         
-        # Check for complexity
-        checks = [
-            any(c.isupper() for c in password),  # uppercase
-            any(c.islower() for c in password),  # lowercase  
-            any(c.isdigit() for c in password),  # digit
-            any(not c.isalnum() for c in password)  # special
-        ]
+        # SIMPLE VALIDATION: Just check it's not empty and meets length
+        # Remove complexity requirements for now - you can add them back later
+        return True, "Password is acceptable"
+    
+    def _validate_email_format(self, email: str) -> (bool, str):
+        """Validate email format - SIMPLIFIED"""
+        if not email or not isinstance(email, str):
+            return False, "Email is required"
         
-        # Count how many checks passed
-        passed_count = sum(checks)
+        # Check for basic email format (simplified)
+        if '@' not in email or '.' not in email:
+            return False, "Invalid email format"
         
-        # At least 3 of the 4 checks should pass
-        if passed_count < 1:
-            return False, "Password should contain at least 3 of: uppercase, lowercase, digit, special character"
+        # More permissive regex for testing
+        # Allows: user@example.com, user.name@domain.co.uk, user+tag@domain.com
+        email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_regex, email):
+            return False, "Invalid email address format"
         
-        return True, "Password is strong"
+        return True, "Email format is valid"
     
     def hash_password(self, password: str) -> str:
         """Hash a password with configurable work factor"""
@@ -53,22 +58,34 @@ class AuthManager:
         """Create a new user with validation"""
         self._ensure_db()
         
-        # Validate password strength
-        is_valid, message = self._validate_password_strength(password)
-        if not is_valid:
-            raise ValueError(message)
+        # DEBUG: Log what we're receiving
+        print(f"🔍 CREATE_USER RECEIVED:")
+        print(f"  Username: '{username}'")
+        print(f"  Email: '{email}'")
+        print(f"  Password: '{password[:2]}...' (length: {len(password)})")
         
         # Validate username
-        if len(username) < 3 or len(username) > 20:
+        if not username or len(username) < 3 or len(username) > 20:
             raise ValueError("Username must be 3-20 characters")
+        
         if not re.match(r'^[a-zA-Z0-9_]+$', username):
             raise ValueError("Username can only contain letters, numbers, and underscores")
         
-        # Validate email if provided
-        if email:
-            email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
-            if not re.match(email_regex, email):
-                raise ValueError("Invalid email address")
+        # Validate email (can be null/empty for guest users)
+        if email and email.strip():
+            is_valid, email_msg = self._validate_email_format(email)
+            if not is_valid:
+                print(f"❌ Email validation failed: {email_msg}")
+                raise ValueError(email_msg)
+            email = email.strip()  # Clean up whitespace
+        else:
+            email = None  # Allow null email
+        
+        # Validate password
+        is_valid, password_msg = self._validate_password_strength(password)
+        if not is_valid:
+            print(f"❌ Password validation failed: {password_msg}")
+            raise ValueError(password_msg)
         
         conn = db.get_connection()
         cursor = conn.cursor()
@@ -89,6 +106,11 @@ class AuthManager:
             user_id = str(uuid.uuid4())
             password_hash = self.hash_password(password)
             created_at = datetime.now().isoformat()
+            
+            print(f"✅ Creating user with:")
+            print(f"  ID: {user_id}")
+            print(f"  Username: {username}")
+            print(f"  Email: {email or 'None'}")
             
             cursor.execute('''
                 INSERT INTO users 
@@ -111,13 +133,18 @@ class AuthManager:
             
         except Exception as e:
             conn.rollback()
+            print(f"❌ Database error in create_user: {e}")
             raise e
         finally:
             conn.close()
     
     def authenticate_user(self, username: str, password: str) -> Optional[Dict]:
-        """Authenticate user with rate limiting protection"""
+        """Authenticate user"""
         self._ensure_db()
+        
+        print(f"🔍 AUTHENTICATE_USER RECEIVED:")
+        print(f"  Username: '{username}'")
+        print(f"  Password: '{password[:2]}...' (length: {len(password)})")
         
         conn = db.get_connection()
         cursor = conn.cursor()
@@ -127,10 +154,14 @@ class AuthManager:
             user = cursor.fetchone()
             
             if not user:
+                print(f"❌ User not found: {username}")
                 return None
+            
+            print(f"✅ User found: {user['username']}")
             
             # Verify password
             if not self.verify_password(password, user['password_hash']):
+                print(f"❌ Password verification failed for user: {username}")
                 return None
             
             # Update last login
@@ -149,6 +180,7 @@ class AuthManager:
             }
             
         except Exception as e:
+            print(f"❌ Authentication error: {e}")
             raise e
         finally:
             conn.close()
