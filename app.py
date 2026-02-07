@@ -917,6 +917,19 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
     conn = get_db()
     cursor = conn.cursor()
     
+    # Moved the function definition OUTSIDE the try block
+    def check_for_tonk(hand):
+        """Check if player has Tonk (5 points or less)"""
+        total = 0
+        for card in hand:
+            if card['rank'] in ['J', 'Q', 'K']:
+                total += 10
+            elif card['rank'] == 'A':
+                total += 1
+            else:
+                total += int(card['rank'])
+        return total <= 5
+    
     try:
         # Verify user is in the game
         if not verify_user_in_game(game_id, move_request.user_id):
@@ -993,47 +1006,35 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
                 raise HTTPException(status_code=400, detail="Discard pile is empty")
         
         elif move_request.moveType == 'discard':
-          card_id = move_request.moveData.get('cardId')
-          if not card_id:
-              raise HTTPException(status_code=400, detail="No card specified")
-          
-          # Find and remove card from hand
-          card_index = None
-          for i, card in enumerate(player['hand']):
-              if card.get('id') == card_id:
-                  card_index = i
-                  break
-          
-          if card_index is None:
-              raise HTTPException(status_code=400, detail="Card not found in hand")
-          
-          discarded_card = player['hand'].pop(card_index)
-          game_state['discard_pile'].append(discarded_card)
-    
-    # Check for Tonk after discard
-    def check_for_tonk(hand):
-        """Check if player has Tonk (5 points or less)"""
-        total = 0
-        for card in hand:
-            if card['rank'] in ['J', 'Q', 'K']:
-                total += 10
-            elif card['rank'] == 'A':
-                total += 1
+            card_id = move_request.moveData.get('cardId')
+            if not card_id:
+                raise HTTPException(status_code=400, detail="No card specified")
+            
+            # Find and remove card from hand
+            card_index = None
+            for i, card in enumerate(player['hand']):
+                if card.get('id') == card_id:
+                    card_index = i
+                    break
+            
+            if card_index is None:
+                raise HTTPException(status_code=400, detail="Card not found in hand")
+            
+            discarded_card = player['hand'].pop(card_index)
+            game_state['discard_pile'].append(discarded_card)
+            
+            # Check for Tonk after discard
+            if check_for_tonk(player['hand']):
+                game_state['game_status'] = 'game_over'
+                game_state['winner'] = player['name']
+                game_state['win_reason'] = 'tonk'
+                move_result['message'] = f"{player['name']} got TONK! Game over!"
             else:
-                total += int(card['rank'])
-        return total <= 5
-    
-    if check_for_tonk(player['hand']):
-        game_state['game_status'] = 'game_over'
-        game_state['winner'] = player['name']
-        game_state['win_reason'] = 'tonk'
-        move_result['message'] = f"{player['name']} got TONK! Game over!"
-    else:
-        # Move to next player
-        game_state['current_player_index'] = (current_player_idx + 1) % len(game_state['players'])
-        game_state['turn_phase'] = 'draw'  # Change to draw for next player
-        game_state['turn_count'] = game_state.get('turn_count', 0) + 1
-        move_result['message'] = f"{player['name']} discarded {discarded_card['rank']} of {discarded_card['suit']}"
+                # Move to next player
+                game_state['current_player_index'] = (current_player_idx + 1) % len(game_state['players'])
+                game_state['turn_phase'] = 'draw'  # Change to draw for next player
+                game_state['turn_count'] = game_state.get('turn_count', 0) + 1
+                move_result['message'] = f"{player['name']} discarded {discarded_card['rank']} of {discarded_card['suit']}"
         
         elif move_request.moveType == 'play_spread':
             spread_cards = move_request.moveData.get('cards', [])
