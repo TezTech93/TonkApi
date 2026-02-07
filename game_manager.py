@@ -45,8 +45,8 @@ class GameManager:
         """Deal cards to players"""
         hands = [[] for _ in range(num_players)]
         
-        # Deal 7 cards to each player (standard for Tonk)
-        for i in range(7):
+        # Deal 5 cards to each player (standard for Tonk)
+        for i in range(5):
             for player_idx in range(num_players):
                 if deck:
                     hands[player_idx].append(deck.pop())
@@ -54,107 +54,117 @@ class GameManager:
         return deck, hands
     
     def create_game(self, players: List[Dict], game_name: Optional[str] = None, creator_id: Optional[str] = None) -> Dict:
-        """Create a new game"""
-        self._ensure_db()
+    """Create a new game - FIXED: All players get proper hands"""
+    self._ensure_db()
+    
+    game_id = str(uuid.uuid4())
+    room_code = ''.join(random.choices('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', k=6))
+    created_at = datetime.now().isoformat()
+    
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Create game record
+        cursor.execute('''
+            INSERT INTO games (id, room_code, game_name, game_status, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (game_id, room_code, game_name, 'lobby', created_at))
         
-        game_id = str(uuid.uuid4())
-        room_code = ''.join(random.choices('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', k=6))
-        created_at = datetime.now().isoformat()
+        # Create players and game state
+        player_ids = []
+        game_players = []
         
-        conn = db.get_connection()
-        cursor = conn.cursor()
+        # Create initial deck
+        deck = self.create_deck()
         
-        try:
-            # Create game record
+        # Deal cards - FIXED: All players get 5 cards
+        remaining_deck, hands = self.deal_cards(deck, len(players))
+        
+        print(f"🎮 DEBUG: Created game with {len(players)} players")
+        print(f"🎮 DEBUG: Each player should have 5 cards")
+        print(f"🎮 DEBUG: Hands lengths: {[len(h) for h in hands]}")
+        
+        for i, player_data in enumerate(players):
+            player_id = str(uuid.uuid4())
+            player_ids.append(player_id)
+            
+            # Assign user_id
+            user_id = None
+            if i == 0 and creator_id and not player_data.get("is_computer", False):
+                user_id = creator_id
+            elif player_data.get("user_id") and not player_data.get("is_computer", False):
+                user_id = player_data["user_id"]
+            
+            # Add to game_players table
             cursor.execute('''
-                INSERT INTO games (id, room_code, game_name, game_status, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (game_id, room_code, game_name, 'lobby', created_at))
+                INSERT INTO game_players (id, game_id, user_id, player_name, position, is_computer, is_host, is_ready)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                player_id, game_id, user_id, 
+                player_data["name"], 
+                i,
+                1 if player_data.get("is_computer", False) else 0,
+                1 if i == 0 else 0,  # First player is host
+                1 if not player_data.get("is_computer", False) else 0
+            ))
             
-            # Create players and game state
-            player_ids = []
-            game_players = []
-            
-            # Create initial deck
-            deck = self.create_deck()
-            
-            # Deal cards
-            remaining_deck, hands = self.deal_cards(deck, len(players))
-            
-            for i, player_data in enumerate(players):
-                player_id = str(uuid.uuid4())
-                player_ids.append(player_id)
-                
-                # Assign user_id: creator for first human player, or provided user_id
-                user_id = None
-                if i == 0 and creator_id and not player_data.get("is_computer", False):
-                    user_id = creator_id
-                elif player_data.get("user_id") and not player_data.get("is_computer", False):
-                    user_id = player_data["user_id"]
-                
-                # Add to game_players table
-                cursor.execute('''
-                    INSERT INTO game_players (id, game_id, user_id, player_name, position, is_computer, is_host, is_ready)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    player_id, game_id, user_id, 
-                    player_data["name"], 
-                    i,
-                    1 if player_data.get("is_computer", False) else 0,
-                    1 if i == 0 else 0,  # First player is host
-                    1 if not player_data.get("is_computer", False) else 0  # Human players start ready
-                ))
-                
-                # Add to game state players list
-                game_players.append({
-                    'id': player_id,
-                    'name': player_data["name"],
-                    'user_id': user_id,
-                    'hand': hands[i] if i < len(hands) else [],
-                    'is_computer': bool(player_data.get("is_computer", False)),
-                    'is_current_turn': i == 0,
-                    'position': i,
-                    'points': 0,
-                    'is_ready': not player_data.get("is_computer", False)
-                })
-            
-            # Create game state
-            game_state = {
-                'id': game_id,
-                'room_code': room_code,
-                'game_status': 'lobby',
-                'turn_count': 0,
-                'turn_phase': 'waiting',
-                'deck': remaining_deck,
-                'discard_pile': [],
-                'players': game_players,
-                'current_player_index': 0,
-                'last_move': None,
-                'created_at': created_at
-            }
-            
-            # Save game state
-            state_id = str(uuid.uuid4())
-            cursor.execute('''
-                INSERT INTO game_states (id, game_id, state_json)
-                VALUES (?, ?, ?)
-            ''', (state_id, game_id, json.dumps(game_state)))
-            
-            conn.commit()
-            conn.close()
-            
-            return {
-                "success": True,
-                "game_id": game_id,
-                "room_code": room_code,
-                "player_id": player_ids[0] if player_ids else None,
-                "game_state": game_state,
-                "message": "Game created successfully"
-            }
-            
-        except Exception as e:
-            conn.close()
-            raise e
+            # Add to game state players list
+            game_players.append({
+                'id': player_id,
+                'name': player_data["name"],
+                'user_id': user_id,
+                'hand': hands[i] if i < len(hands) else [],
+                'is_computer': bool(player_data.get("is_computer", False)),
+                'is_current_turn': i == 0,
+                'position': i,
+                'points': 0,
+                'is_ready': not player_data.get("is_computer", False)
+            })
+        
+        # Create game state
+        game_state = {
+            'id': game_id,
+            'room_code': room_code,
+            'game_status': 'lobby',
+            'turn_count': 0,
+            'turn_phase': 'waiting',
+            'deck': remaining_deck,
+            'deck_length': len(remaining_deck),  # ADD THIS
+            'discard_pile': [],
+            'players': game_players,
+            'current_player_index': 0,
+            'last_move': None,
+            'created_at': created_at
+        }
+        
+        # Debug output
+        print(f"🎮 DEBUG: Game state created")
+        print(f"🎮 DEBUG: Total cards in deck: {len(game_state['deck'])}")
+        print(f"🎮 DEBUG: Player hands: {[(p['name'], len(p['hand'])) for p in game_state['players']]}")
+        
+        # Save game state
+        state_id = str(uuid.uuid4())
+        cursor.execute('''
+            INSERT INTO game_states (id, game_id, state_json)
+            VALUES (?, ?, ?)
+        ''', (state_id, game_id, json.dumps(game_state)))
+        
+        conn.commit()
+        conn.close()
+        
+        return {
+            "success": True,
+            "game_id": game_id,
+            "room_code": room_code,
+            "player_id": player_ids[0] if player_ids else None,
+            "game_state": game_state,
+            "message": "Game created successfully"
+        }
+        
+    except Exception as e:
+        conn.close()
+        raise e
     
     def get_game(self, game_id: str) -> Optional[Dict]:
         """Get game by ID"""

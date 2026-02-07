@@ -626,7 +626,7 @@ async def get_game_state(identifier: str):
 
 @app.get("/api/game/{identifier}/state/private")
 async def get_private_game_state(identifier: str, user_id: str = Query(...)):
-    """Get game state with user-specific data (hides other players' cards)"""
+    """Get game state with user-specific data (hides other players' cards) - FIXED"""
     conn = get_db()
     cursor = conn.cursor()
     
@@ -666,11 +666,30 @@ async def get_private_game_state(identifier: str, user_id: str = Query(...)):
             # Filter sensitive information based on user
             filtered_state = game_state.copy()
             
+            # Add deck_length if missing
+            if 'deck' in filtered_state and 'deck_length' not in filtered_state:
+                filtered_state['deck_length'] = len(filtered_state['deck'])
+            
             # Only show current user's hand fully
             for player in filtered_state.get('players', []):
                 if player.get('user_id') != user_id:
-                    # Hide other players' cards, just show count
-                    player['hand'] = [{'id': 'hidden', 'count': len(player.get('hand', []))}]
+                    # FIX: Return array of hidden cards, one for each card in hand
+                    hand_size = len(player.get('hand', []))
+                    # Create an array of hidden card objects
+                    hidden_cards = []
+                    for i in range(hand_size):
+                        hidden_cards.append({
+                            'id': f'hidden_{player["id"]}_{i}',
+                            'rank': '?',
+                            'suit': 'hidden',
+                            'value': 0,
+                            'is_hidden': True
+                        })
+                    player['hand'] = hidden_cards
+            
+            print(f"🔍 DEBUG - Private state for {user_id}:")
+            print(f"  - Deck length: {filtered_state.get('deck_length', 'N/A')}")
+            print(f"  - Players hand sizes: {[(p['name'], len(p['hand'])) for p in filtered_state.get('players', [])]}")
             
             return {
                 "success": True,
@@ -693,6 +712,7 @@ async def get_private_game_state(identifier: str, user_id: str = Query(...)):
     except HTTPException:
         raise
     except Exception as e:
+        print(f"❌ Error in get_private_game_state: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get private game state: {str(e)}"
@@ -777,7 +797,7 @@ async def get_lobby_state(identifier: str):
 
 @app.post("/api/game/{identifier}/start")
 async def start_game(identifier: str, user_id: str = Query(...)):
-    """Start a game - USING GAME MANAGER"""
+    """Start a game - FIXED: Ensure all players have 5 cards"""
     try:
         # Get game ID from identifier
         conn = get_db()
@@ -788,17 +808,86 @@ async def start_game(identifier: str, user_id: str = Query(...)):
             (identifier, identifier.upper())
         )
         game = cursor.fetchone()
-        conn.close()
         
         if not game:
+            conn.close()
             raise HTTPException(status_code=404, detail="Game not found")
         
+        # First, get the current game state
+        cursor.execute(
+            "SELECT state_json FROM game_states WHERE game_id = ?",
+            (game['id'],)
+        )
+        state_row = cursor.fetchone()
+        
+        if state_row:
+            game_state = json.loads(state_row['state_json'])
+            
+            # Ensure all players have exactly 5 cards
+            deck = game_state.get('deck', [])
+            players = game_state.get('players', [])
+            
+            print(f"🎮 DEBUG - Starting game {identifier}")
+            print(f"🎮 DEBUG - Current deck size: {len(deck)}")
+            print(f"🎮 DEBUG - Player hand sizes before: {[(p['name'], len(p.get('hand', []))) for p in players]}")
+            
+            # If any player doesn't have 5 cards, fix it
+            for player in players:
+                current_hand = player.get('hand', [])
+                if len(current_hand) < 5 and deck:
+                    cards_needed = 5 - len(current_hand)
+                    print(f"🎮 DEBUG - Player {player['name']} needs {cards_needed} more cards")
+                    for _ in range(cards_needed):
+                        if deck:
+                            current_hand.append(deck.pop())
+                    player['hand'] = current_hand
+            
+            # Update game state
+            game_state['deck'] = deck
+            game_state['deck_length'] = len(deck)
+            game_state['game_status'] = 'playing'
+            game_state['turn_phase'] = 'draw'
+            game_state['current_player_index'] = 0
+            
+            # Update first player's turn
+            for i, player in enumerate(game_state['players']):
+                player['is_current_turn'] = (i == 0)
+            
+            print(f"🎮 DEBUG - Player hand sizes after: {[(p['name'], len(p.get('hand', []))) for p in players]}")
+            
+            # Save updated state
+            cursor.execute(
+                "UPDATE game_states SET state_json = ? WHERE game_id = ?",
+                (json.dumps(game_state), game['id'])
+            )
+            
+            # Update game status
+            cursor.execute(
+                "UPDATE games SET game_status = 'playing', started_at = ? WHERE id = ?",
+                (datetime.now().isoformat(), game['id'])
+            )
+            
+            conn.commit()
+        
+        conn.close()
+        
+        # Now call the game manager's start_game
         result = game_manager.start_game(
             game_id=game['id'],
             user_id=user_id
         )
+        
+        # Ensure the returned game state has deck_length
+        if result.get('game_state'):
+            game_state = result['game_state']
+            if 'deck' in game_state and 'deck_length' not in game_state:
+                game_state['deck_length'] = len(game_state['deck'])
+            result['game_state'] = game_state
+        
         return result
+        
     except Exception as e:
+        print(f"❌ Error starting game: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
