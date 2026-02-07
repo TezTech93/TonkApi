@@ -1174,6 +1174,146 @@ async def get_game_id(room_code: str):
         )
     finally:
         conn.close()
+        
+@app.post("/api/game/{game_id}/ai-move")
+async def trigger_ai_move(game_id: str):
+    """Trigger an AI move for the current CPU player"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        # Get game state
+        cursor.execute(
+            "SELECT state_json FROM game_states WHERE game_id = ?",
+            (game_id,)
+        )
+        state_record = cursor.fetchone()
+        
+        if not state_record:
+            raise HTTPException(status_code=404, detail="Game state not found")
+        
+        game_state = json.loads(state_record['state_json'])
+        
+        # Check if current player is a CPU
+        current_player_idx = game_state.get('current_player_index', 0)
+        current_player = game_state['players'][current_player_idx] if game_state['players'] else None
+        
+        if not current_player or not current_player.get('is_computer', False):
+            return {
+                "success": False,
+                "message": "Current player is not a CPU",
+                "game_state": game_state
+            }
+        
+        # Define AI move logic
+        def ai_make_move():
+            """AI decides what move to make"""
+            turn_phase = game_state.get('turn_phase', 'draw')
+            
+            if turn_phase == 'draw':
+                # AI draws from deck (could be smarter and check discard)
+                if game_state['deck']:
+                    drawn_card = game_state['deck'].pop()
+                    current_player['hand'].append(drawn_card)
+                    game_state['turn_phase'] = 'play'
+                    return f"CPU drew {drawn_card['rank']} of {drawn_card['suit']}"
+                else:
+                    # If deck is empty, try discard pile
+                    if game_state['discard_pile']:
+                        drawn_card = game_state['discard_pile'].pop()
+                        current_player['hand'].append(drawn_card)
+                        game_state['turn_phase'] = 'play'
+                        return f"CPU drew from discard: {drawn_card['rank']} of {drawn_card['suit']}"
+                    else:
+                        return "No cards to draw"
+                        
+            elif turn_phase == 'play':
+                # AI discards a card (simple logic: discard highest value card)
+                if not current_player['hand']:
+                    return "No cards to discard"
+                
+                # Find the highest value card to discard (bad for AI, but simple)
+                card_to_discard = None
+                highest_value = -1
+                
+                for card in current_player['hand']:
+                    card_value = card.get('value', 0)
+                    if card_value > highest_value:
+                        highest_value = card_value
+                        card_to_discard = card
+                
+                if card_to_discard:
+                    current_player['hand'].remove(card_to_discard)
+                    game_state['discard_pile'].append(card_to_discard)
+                    
+                    # Check for Tonk
+                    def check_tonk(hand):
+                        total = 0
+                        for card in hand:
+                            if card['rank'] in ['J', 'Q', 'K']:
+                                total += 10
+                            elif card['rank'] == 'A':
+                                total += 1
+                            else:
+                                total += int(card['rank'])
+                        return total <= 5
+                    
+                    if check_tonk(current_player['hand']):
+                        game_state['game_status'] = 'game_over'
+                        game_state['winner'] = current_player['name']
+                        game_state['win_reason'] = 'tonk'
+                        message = f"{current_player['name']} got TONK! Game over!"
+                    else:
+                        # Move to next player
+                        game_state['current_player_index'] = (current_player_idx + 1) % len(game_state['players'])
+                        game_state['turn_phase'] = 'draw'
+                        game_state['turn_count'] = game_state.get('turn_count', 0) + 1
+                        message = f"{current_player['name']} discarded {card_to_discard['rank']} of {card_to_discard['suit']}"
+                    
+                    return message
+        
+        # Make the AI move
+        ai_message = ai_make_move()
+        
+        # Update last move
+        game_state['last_move'] = {
+            'player_id': current_player['id'],
+            'player_name': current_player['name'],
+            'move_type': game_state['turn_phase'],  # This will be the phase before the move
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        
+        # Save updated state
+        cursor.execute(
+            "UPDATE game_states SET state_json = ?, last_updated = CURRENT_TIMESTAMP WHERE game_id = ?",
+            (json.dumps(game_state), game_id)
+        )
+        
+        # Update game if over
+        if game_state['game_status'] == 'game_over':
+            cursor.execute(
+                "UPDATE games SET game_status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (game_id,)
+            )
+        
+        conn.commit()
+        
+        return {
+            "success": True,
+            "message": f"AI move: {ai_message}",
+            "game_state": game_state
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to make AI move: {str(e)}"
+        )
+    finally:
+        conn.close()
 
 # ============ ADMIN ENDPOINTS ============
 
