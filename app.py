@@ -917,7 +917,7 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
     conn = get_db()
     cursor = conn.cursor()
     
-    # Moved the function definition OUTSIDE the try block
+    # Helper functions defined at the start
     def check_for_tonk(hand):
         """Check if player has Tonk (5 points or less)"""
         total = 0
@@ -927,8 +927,66 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
             elif card['rank'] == 'A':
                 total += 1
             else:
-                total += int(card['rank'])
+                try:
+                    total += int(card['rank'])
+                except ValueError:
+                    total += 0  # Handle any unexpected rank values
         return total <= 5
+    
+    def is_valid_spread(cards):
+        """Check if cards form a valid spread (run or set)"""
+        if len(cards) < 3:
+            return False
+        
+        # Check for set (same rank)
+        ranks = [card['rank'] for card in cards]
+        if len(set(ranks)) == 1:
+            return True
+        
+        # Check for run (consecutive ranks, same suit)
+        suits = [card['suit'] for card in cards]
+        if len(set(suits)) > 1:
+            return False
+        
+        # Sort by rank value
+        rank_order = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
+        sorted_cards = sorted(cards, key=lambda x: rank_order.index(x['rank']))
+        
+        # Check if consecutive
+        for i in range(1, len(sorted_cards)):
+            current_idx = rank_order.index(sorted_cards[i]['rank'])
+            prev_idx = rank_order.index(sorted_cards[i-1]['rank'])
+            if current_idx != prev_idx + 1:
+                return False
+        
+        return True
+    
+    def is_valid_hit(card, spread_cards):
+        """Check if card can be added to spread"""
+        # If spread is a set (same rank)
+        ranks = [c['rank'] for c in spread_cards]
+        if len(set(ranks)) == 1:
+            return card['rank'] == spread_cards[0]['rank']
+        
+        # If spread is a run (consecutive ranks, same suit)
+        suits = [c['suit'] for c in spread_cards]
+        if len(set(suits)) != 1:
+            return False
+        
+        # Sort by rank
+        rank_order = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
+        sorted_cards = sorted(spread_cards, key=lambda x: rank_order.index(x['rank']))
+        
+        # Check if card can extend the run
+        if card['suit'] != sorted_cards[0]['suit']:
+            return False
+        
+        # Check if card is one less than first card or one more than last card
+        first_rank_idx = rank_order.index(sorted_cards[0]['rank'])
+        last_rank_idx = rank_order.index(sorted_cards[-1]['rank'])
+        card_rank_idx = rank_order.index(card['rank'])
+        
+        return card_rank_idx == first_rank_idx - 1 or card_rank_idx == last_rank_idx + 1
     
     try:
         # Verify user is in the game
@@ -984,28 +1042,45 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
         }
         
         player = next((p for p in game_state['players'] if p['id'] == move_request.player_id), None)
+        if not player:
+            raise HTTPException(status_code=400, detail="Player not found")
         
-        if move_request.moveType == 'draw_from_deck':
-            if game_state['deck']:
-                drawn_card = game_state['deck'].pop()
-                player['hand'].append(drawn_card)
-                game_state['turn_phase'] = 'play'
-                move_result['success'] = True
-                move_result['message'] = f"Drew {drawn_card['rank']} of {drawn_card['suit']}"
-            else:
+        turn_phase = game_state.get('turn_phase', 'waiting')
+        move_type = move_request.moveType
+        
+        # ============ DRAW FROM DECK ============
+        if move_type == 'draw_from_deck':
+            if turn_phase != 'draw':
+                raise HTTPException(status_code=400, detail="Not in draw phase")
+            
+            if not game_state['deck']:
                 raise HTTPException(status_code=400, detail="Deck is empty")
+            
+            drawn_card = game_state['deck'].pop()
+            player['hand'].append(drawn_card)
+            game_state['turn_phase'] = 'play'
+            move_result['success'] = True
+            move_result['message'] = f"Drew {drawn_card['rank']} of {drawn_card['suit']}"
         
-        elif move_request.moveType == 'draw_from_discard':
-            if game_state['discard_pile']:
-                drawn_card = game_state['discard_pile'].pop()
-                player['hand'].append(drawn_card)
-                game_state['turn_phase'] = 'play'
-                move_result['success'] = True
-                move_result['message'] = f"Drew {drawn_card['rank']} of {drawn_card['suit']} from discard"
-            else:
+        # ============ DRAW FROM DISCARD ============
+        elif move_type == 'draw_from_discard':
+            if turn_phase != 'draw':
+                raise HTTPException(status_code=400, detail="Not in draw phase")
+            
+            if not game_state['discard_pile']:
                 raise HTTPException(status_code=400, detail="Discard pile is empty")
+            
+            drawn_card = game_state['discard_pile'].pop()
+            player['hand'].append(drawn_card)
+            game_state['turn_phase'] = 'play'
+            move_result['success'] = True
+            move_result['message'] = f"Drew {drawn_card['rank']} of {drawn_card['suit']} from discard"
         
-        elif move_request.moveType == 'discard':
+        # ============ DISCARD ============
+        elif move_type == 'discard':
+            if turn_phase != 'play':
+                raise HTTPException(status_code=400, detail="Not in play phase")
+            
             card_id = move_request.moveData.get('cardId')
             if not card_id:
                 raise HTTPException(status_code=400, detail="No card specified")
@@ -1031,84 +1106,145 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
                 move_result['message'] = f"{player['name']} got TONK! Game over!"
             else:
                 # Move to next player
-                game_state['current_player_index'] = (current_player_idx + 1) % len(game_state['players'])
-                game_state['turn_phase'] = 'draw'  # Change to draw for next player
+                next_player_idx = (current_player_idx + 1) % len(game_state['players'])
+                game_state['current_player_index'] = next_player_idx
+                game_state['turn_phase'] = 'draw'
                 game_state['turn_count'] = game_state.get('turn_count', 0) + 1
+                
+                # Update turn indicators
+                for i, p in enumerate(game_state['players']):
+                    p['is_current_turn'] = (i == next_player_idx)
+                
                 move_result['message'] = f"{player['name']} discarded {discarded_card['rank']} of {discarded_card['suit']}"
+            
+            move_result['success'] = True
         
-        elif move_request.moveType == 'play_spread':
+        # ============ PLAY SPREAD ============
+        elif move_type == 'play_spread':
+            if turn_phase != 'play':
+                raise HTTPException(status_code=400, detail="Not in play phase")
+            
             spread_cards = move_request.moveData.get('cards', [])
             if len(spread_cards) < 3:
                 raise HTTPException(status_code=400, detail="Spread must have at least 3 cards")
             
-            # Validate spread
-            def is_valid_spread(cards):
-                """Check if cards form a valid spread (run or set)"""
-                if len(cards) < 3:
-                    return False
-                
-                # Check for set (same rank)
-                ranks = [card['rank'] for card in cards]
-                if len(set(ranks)) == 1:
-                    return True
-                
-                # Check for run (consecutive ranks, same suit)
-                suits = [card['suit'] for card in cards]
-                if len(set(suits)) > 1:
-                    return False
-                
-                # Sort by rank value
-                rank_order = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
-                sorted_cards = sorted(cards, key=lambda x: rank_order.index(x['rank']))
-                
-                for i in range(1, len(sorted_cards)):
-                    current_idx = rank_order.index(sorted_cards[i]['rank'])
-                    prev_idx = rank_order.index(sorted_cards[i-1]['rank'])
-                    if current_idx != prev_idx + 1:
-                        return False
-                
-                return True
-            
+            # Find cards in player's hand
             spread_cards_objects = []
+            cards_to_remove = []
+            
             for card_id in spread_cards:
                 card_found = False
                 for i, card in enumerate(player['hand']):
                     if card.get('id') == card_id:
                         spread_cards_objects.append(card)
-                        player['hand'].pop(i)
+                        cards_to_remove.append(i)
                         card_found = True
                         break
+                
                 if not card_found:
                     raise HTTPException(status_code=400, detail=f"Card {card_id} not found in hand")
             
+            # Validate the spread
             if not is_valid_spread(spread_cards_objects):
-                # Return cards to hand
-                player['hand'].extend(spread_cards_objects)
-                raise HTTPException(status_code=400, detail="Invalid spread")
+                raise HTTPException(status_code=400, detail="Invalid spread - must be a set (same rank) or run (consecutive ranks, same suit)")
+            
+            # Remove cards from hand (in reverse order to preserve indices)
+            for index in sorted(cards_to_remove, reverse=True):
+                player['hand'].pop(index)
             
             # Add spread to table
             if 'table_spreads' not in game_state:
                 game_state['table_spreads'] = []
             
+            # Sort the spread if it's a run
+            if len(set([c['rank'] for c in spread_cards_objects])) > 1:
+                rank_order = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
+                spread_cards_objects = sorted(spread_cards_objects, 
+                                              key=lambda x: rank_order.index(x['rank']))
+            
+            spread_id = f"spread_{len(game_state['table_spreads'])}"
             game_state['table_spreads'].append({
-                'id': f"spread_{len(game_state['table_spreads'])}",
+                'id': spread_id,
                 'cards': spread_cards_objects,
                 'player': player['name'],
-                'player_id': player['id']
+                'player_id': player['id'],
+                'created_at': datetime.utcnow().isoformat()
             })
             
             move_result['success'] = True
-            move_result['message'] = f"{player['name']} played a spread"
+            move_result['message'] = f"{player['name']} played a spread with {len(spread_cards_objects)} cards"
+        
+        # ============ HIT SPREAD ============
+        elif move_type == 'hit_spread':
+            if turn_phase != 'play':
+                raise HTTPException(status_code=400, detail="Not in play phase")
+            
+            card_id = move_request.moveData.get('cardId')
+            spread_id = move_request.moveData.get('spreadId')
+            
+            if not card_id or not spread_id:
+                raise HTTPException(status_code=400, detail="Missing cardId or spreadId")
+            
+            # Find the card in player's hand
+            card_to_play = None
+            card_index = None
+            for i, card in enumerate(player['hand']):
+                if card.get('id') == card_id:
+                    card_to_play = card
+                    card_index = i
+                    break
+            
+            if not card_to_play:
+                raise HTTPException(status_code=400, detail="Card not found in hand")
+            
+            # Find the spread on table
+            spread_to_hit = None
+            spread_index = None
+            for i, spread in enumerate(game_state.get('table_spreads', [])):
+                if spread.get('id') == spread_id:
+                    spread_to_hit = spread
+                    spread_index = i
+                    break
+            
+            if not spread_to_hit:
+                raise HTTPException(status_code=400, detail="Spread not found on table")
+            
+            # Check if the hit is valid
+            if not is_valid_hit(card_to_play, spread_to_hit['cards']):
+                raise HTTPException(status_code=400, detail="Invalid hit - card doesn't match spread")
+            
+            # Remove card from hand and add to spread
+            player['hand'].pop(card_index)
+            spread_to_hit['cards'].append(card_to_play)
+            
+            # Re-sort the spread if it's a run
+            if len(set([c['rank'] for c in spread_to_hit['cards']])) > 1:
+                rank_order = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
+                spread_to_hit['cards'] = sorted(spread_to_hit['cards'], 
+                                                key=lambda x: rank_order.index(x['rank']))
+            
+            # Update the spread in the table
+            game_state['table_spreads'][spread_index] = spread_to_hit
+            
+            move_result['success'] = True
+            move_result['message'] = f"{player['name']} hit {spread_to_hit['player']}'s spread"
+        
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown move type: {move_type}")
         
         # Update last move
         game_state['last_move'] = {
             'player_id': move_request.player_id,
             'user_id': move_request.user_id,
             'player_name': player['name'],
-            'move_type': move_request.moveType,
+            'move_type': move_type,
             'move_data': move_request.moveData,
             'timestamp': datetime.utcnow().isoformat()
         }
+        
+        # Ensure deck_length is updated
+        if 'deck' in game_state:
+            game_state['deck_length'] = len(game_state['deck'])
         
         # Save updated state
         cursor.execute(
@@ -1126,20 +1262,24 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
         conn.commit()
         
         move_result['game_state'] = game_state
-        move_result['success'] = True
+        if not move_result.get('success'):
+            move_result['success'] = True  # If we reached here without raising, it was successful
         
         return move_result
         
     except HTTPException:
         raise
     except Exception as e:
-        conn.rollback()
+        if conn:
+            conn.rollback()
+        print(f"❌ Error in make_enhanced_move: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to make move: {str(e)}"
         )
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 @app.get("/api/game/room/{room_code}/id")
 async def get_game_id(room_code: str):
