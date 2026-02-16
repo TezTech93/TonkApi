@@ -219,13 +219,13 @@ def import_database(data):
         cursor.execute("DELETE FROM games")
         cursor.execute("DELETE FROM users")
         
-        # Import users - UPDATED COLUMN NAME
+        # Import users
         if 'users' in data:
             for user in data['users']:
                 cursor.execute(
                     """INSERT INTO users 
                        (id, username, email, password_hash, created_at, last_login)
-                       VALUES (%, %, %, %, %, %)""",
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
                     (user['id'], user['username'], user['email'], 
                      user['password_hash'], user['created_at'], user['last_login'])
                 )
@@ -237,23 +237,26 @@ def import_database(data):
                     """INSERT INTO games 
                        (id, room_code, game_name, game_status, 
                         max_players, created_at, started_at, completed_at)
-                       VALUES (%, %, %, %, %, %, %, %)""",
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                     (game['id'], game['room_code'], game['game_name'], 
                      game['game_status'], game['max_players'],
                      game['created_at'], game['started_at'], game['completed_at'])
                 )
         
-        # Import game_players
+        # Import game_players - FIX: convert integer 0/1 to boolean
         if 'game_players' in data:
             for player in data['game_players']:
                 cursor.execute(
                     """INSERT INTO game_players 
                        (id, game_id, user_id, player_name, position, 
                         is_computer, is_ready, is_host, joined_at, left_at)
-                       VALUES (%, %, %, %, %, %, %, %, %, %)""",
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (player['id'], player['game_id'], player['user_id'],
-                     player['player_name'], player['position'], player['is_computer'],
-                     player['is_ready'], player['is_host'], player['joined_at'],
+                     player['player_name'], player['position'], 
+                     bool(player['is_computer']),      # convert to boolean
+                     bool(player['is_ready']),         # convert to boolean
+                     bool(player['is_host']),          # convert to boolean
+                     player['joined_at'],
                      player['left_at'])
                 )
         
@@ -264,7 +267,7 @@ def import_database(data):
                     """INSERT INTO game_states 
                        (id, game_id, state_json, last_updated, 
                         turn_count, current_player_index, turn_phase)
-                       VALUES (%, %, %, %, %, %, %)""",
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
                     (state['id'], state['game_id'], state['state_json'],
                      state['last_updated'], state['turn_count'],
                      state['current_player_index'], state['turn_phase'])

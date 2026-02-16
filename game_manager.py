@@ -1,4 +1,4 @@
-# game_manager.py - PostgreSQL compatible
+# game_manager.py - PostgreSQL compatible with boolean fixes
 import uuid
 import json
 import random
@@ -72,6 +72,7 @@ class GameManager:
                     elif player_data.get("user_id") and not player_data.get("is_computer", False):
                         user_id = player_data["user_id"]
 
+                    # Insert with proper booleans
                     cursor.execute("""
                         INSERT INTO game_players (id, game_id, user_id, player_name, position, is_computer, is_host, is_ready)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -79,9 +80,9 @@ class GameManager:
                         player_id, game_id, user_id,
                         player_data["name"],
                         i,
-                        1 if player_data.get("is_computer", False) else 0,
-                        1 if i == 0 else 0,
-                        1 if not player_data.get("is_computer", False) else 0
+                        player_data.get("is_computer", False),  # boolean
+                        i == 0,                                  # boolean
+                        not player_data.get("is_computer", False)  # boolean
                     ))
 
                     game_players.append({
@@ -201,10 +202,11 @@ class GameManager:
                 player_id = str(uuid.uuid4())
                 position = player_count
 
+                # Insert with proper booleans
                 cursor.execute("""
                     INSERT INTO game_players (id, game_id, user_id, player_name, position, is_computer, is_host, is_ready)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """, (player_id, game_id, user_id, player_name, position, 0, 0, 1))
+                """, (player_id, game_id, user_id, player_name, position, False, False, True))
 
                 cursor.execute("SELECT state_json FROM game_states WHERE game_id = %s", (game_id,))
                 state_row = cursor.fetchone()
