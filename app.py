@@ -105,13 +105,13 @@ def verify_user_in_game(game_id: str, user_id: str) -> bool:
     
     try:
         cursor.execute(
-            "SELECT COUNT(*) as count FROM game_players WHERE game_id = ? AND user_id = ?",
+            "SELECT COUNT(*) as count FROM game_players WHERE game_id = % AND user_id = %",
             (game_id, user_id)
         )
         result = cursor.fetchone()
         return result['count'] > 0
     finally:
-        conn.close()
+        db.return_connection(conn)
 
 def verify_player_belongs_to_user(game_id: str, player_id: str, user_id: str) -> bool:
     """Verify if a player belongs to a specific user"""
@@ -120,13 +120,13 @@ def verify_player_belongs_to_user(game_id: str, player_id: str, user_id: str) ->
     
     try:
         cursor.execute(
-            "SELECT user_id FROM game_players WHERE game_id = ? AND id = ?",
+            "SELECT user_id FROM game_players WHERE game_id = % AND id = %",
             (game_id, player_id)
         )
         result = cursor.fetchone()
         return result and result['user_id'] == user_id
     finally:
-        conn.close()
+        db.return_connection(conn)
 
 # Database export/import functions
 def export_database():
@@ -156,7 +156,7 @@ def export_database():
     game_states = [dict(row) for row in cursor.fetchall()]
     data['game_states'] = game_states
     
-    conn.close()
+    db.return_connection(conn)
     
     return data
 
@@ -203,7 +203,7 @@ def export_database_csv():
         writer.writerow([col[0] for col in cursor.description])
         writer.writerows(game_states)
     
-    conn.close()
+    db.return_connection(conn)
     
     return output.getvalue()
 
@@ -225,7 +225,7 @@ def import_database(data):
                 cursor.execute(
                     """INSERT INTO users 
                        (id, username, email, password_hash, created_at, last_login)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
+                       VALUES (%, %, %, %, %, %)""",
                     (user['id'], user['username'], user['email'], 
                      user['password_hash'], user['created_at'], user['last_login'])
                 )
@@ -237,7 +237,7 @@ def import_database(data):
                     """INSERT INTO games 
                        (id, room_code, game_name, game_status, 
                         max_players, created_at, started_at, completed_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (%, %, %, %, %, %, %, %)""",
                     (game['id'], game['room_code'], game['game_name'], 
                      game['game_status'], game['max_players'],
                      game['created_at'], game['started_at'], game['completed_at'])
@@ -250,7 +250,7 @@ def import_database(data):
                     """INSERT INTO game_players 
                        (id, game_id, user_id, player_name, position, 
                         is_computer, is_ready, is_host, joined_at, left_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (%, %, %, %, %, %, %, %, %, %)""",
                     (player['id'], player['game_id'], player['user_id'],
                      player['player_name'], player['position'], player['is_computer'],
                      player['is_ready'], player['is_host'], player['joined_at'],
@@ -264,7 +264,7 @@ def import_database(data):
                     """INSERT INTO game_states 
                        (id, game_id, state_json, last_updated, 
                         turn_count, current_player_index, turn_phase)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (%, %, %, %, %, %, %)""",
                     (state['id'], state['game_id'], state['state_json'],
                      state['last_updated'], state['turn_count'],
                      state['current_player_index'], state['turn_phase'])
@@ -277,7 +277,7 @@ def import_database(data):
         conn.rollback()
         return {"success": False, "error": str(e)}
     finally:
-        conn.close()
+        db.return_connection(conn)
 
 # API Endpoints
 @app.middleware("http")
@@ -433,7 +433,7 @@ async def update_user(user_id: str, update_data: UserUpdate):
     try:
         # Get current user from database
         cursor.execute(
-            "SELECT email, password_hash FROM users WHERE id = ?",
+            "SELECT email, password_hash FROM users WHERE id = %",
             (user_id,)
         )
         user = cursor.fetchone()
@@ -459,7 +459,7 @@ async def update_user(user_id: str, update_data: UserUpdate):
             
             # Check if email already exists
             cursor.execute(
-                "SELECT id FROM users WHERE email = ? AND id != ?",
+                "SELECT id FROM users WHERE email = % AND id != %",
                 (update_data.email, user_id)
             )
             if cursor.fetchone():
@@ -468,7 +468,7 @@ async def update_user(user_id: str, update_data: UserUpdate):
                     detail="Email already in use"
                 )
             
-            update_fields.append("email = ?")
+            update_fields.append("email = %")
             update_values.append(update_data.email)
         
         # Update password if provided
@@ -495,7 +495,7 @@ async def update_user(user_id: str, update_data: UserUpdate):
             
             # Hash new password
             new_password_hash = auth_manager.hash_password(update_data.new_password)
-            update_fields.append("password_hash = ?")
+            update_fields.append("password_hash = %")
             update_values.append(new_password_hash)
         
         # If no fields to update
@@ -507,7 +507,7 @@ async def update_user(user_id: str, update_data: UserUpdate):
         
         # Build and execute update query
         update_values.append(user_id)
-        update_query = f"UPDATE users SET {', '.join(update_fields)} WHERE id = ?"
+        update_query = f"UPDATE users SET {', '.join(update_fields)} WHERE id = %"
         
         cursor.execute(update_query, update_values)
         conn.commit()
@@ -526,7 +526,7 @@ async def update_user(user_id: str, update_data: UserUpdate):
             detail=f"Failed to update user: {str(e)}"
         )
     finally:
-        conn.close()
+        db.return_connection(conn)
 
 # ============ GAME ENDPOINTS ============
 
@@ -562,9 +562,9 @@ async def join_game(room_code: str, join_data: GameJoin):
         # First get game ID from room code
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM games WHERE room_code = ?", (room_code.upper(),))
+        cursor.execute("SELECT id FROM games WHERE room_code = %", (room_code.upper(),))
         game = cursor.fetchone()
-        conn.close()
+        db.return_connection(conn)
         
         if not game:
             raise HTTPException(status_code=404, detail="Game not found")
@@ -593,11 +593,11 @@ async def get_game_state(identifier: str):
         cursor.execute(
             """SELECT g.id 
                FROM games g 
-               WHERE g.id = ? OR g.room_code = ?""",
+               WHERE g.id = % OR g.room_code = %""",
             (identifier, identifier.upper())
         )
         result = cursor.fetchone()
-        conn.close()
+        db.return_connection(conn)
         
         if not result:
             raise HTTPException(
@@ -636,7 +636,7 @@ async def get_private_game_state(identifier: str, user_id: str = Query(...)):
             """SELECT g.id, g.room_code, g.game_status, gs.state_json 
                FROM games g 
                LEFT JOIN game_states gs ON g.id = gs.game_id 
-               WHERE g.id = ? OR g.room_code = ?""",
+               WHERE g.id = % OR g.room_code = %""",
             (identifier, identifier.upper())
         )
         result = cursor.fetchone()
@@ -649,7 +649,7 @@ async def get_private_game_state(identifier: str, user_id: str = Query(...)):
         
         # Check if user is in the game
         cursor.execute(
-            "SELECT id FROM game_players WHERE game_id = ? AND user_id = ?",
+            "SELECT id FROM game_players WHERE game_id = % AND user_id = %",
             (result['id'], user_id)
         )
         player_in_game = cursor.fetchone()
@@ -718,7 +718,7 @@ async def get_private_game_state(identifier: str, user_id: str = Query(...)):
             detail=f"Failed to get private game state: {str(e)}"
         )
     finally:
-        conn.close()
+        db.return_connection(conn)
 
 @app.get("/api/game/{identifier}/lobby")
 async def get_lobby_state(identifier: str):
@@ -732,7 +732,7 @@ async def get_lobby_state(identifier: str):
             """SELECT g.id, g.room_code, g.game_name, g.game_status, g.max_players, 
                       g.created_at 
                FROM games g 
-               WHERE g.id = ? OR g.room_code = ?""",
+               WHERE g.id = % OR g.room_code = %""",
             (identifier, identifier.upper())
         )
         game = cursor.fetchone()
@@ -750,7 +750,7 @@ async def get_lobby_state(identifier: str):
                       u.username
                FROM game_players gp
                LEFT JOIN users u ON gp.user_id = u.id
-               WHERE gp.game_id = ? 
+               WHERE gp.game_id = % 
                ORDER BY gp.position""",
             (game['id'],)
         )
@@ -793,7 +793,7 @@ async def get_lobby_state(identifier: str):
             detail=f"Failed to get lobby state: {str(e)}"
         )
     finally:
-        conn.close()
+        db.return_connection(conn)
 
 @app.post("/api/game/{identifier}/start")
 async def start_game(identifier: str, user_id: str = Query(...)):
@@ -804,18 +804,18 @@ async def start_game(identifier: str, user_id: str = Query(...)):
         cursor = conn.cursor()
         
         cursor.execute(
-            "SELECT id FROM games WHERE id = ? OR room_code = ?",
+            "SELECT id FROM games WHERE id = % OR room_code = %",
             (identifier, identifier.upper())
         )
         game = cursor.fetchone()
         
         if not game:
-            conn.close()
+            db.return_connection(conn)
             raise HTTPException(status_code=404, detail="Game not found")
         
         # First, get the current game state
         cursor.execute(
-            "SELECT state_json FROM game_states WHERE game_id = ?",
+            "SELECT state_json FROM game_states WHERE game_id = %",
             (game['id'],)
         )
         state_row = cursor.fetchone()
@@ -857,19 +857,19 @@ async def start_game(identifier: str, user_id: str = Query(...)):
             
             # Save updated state
             cursor.execute(
-                "UPDATE game_states SET state_json = ? WHERE game_id = ?",
+                "UPDATE game_states SET state_json = % WHERE game_id = %",
                 (json.dumps(game_state), game['id'])
             )
             
             # Update game status
             cursor.execute(
-                "UPDATE games SET game_status = 'playing', started_at = ? WHERE id = ?",
+                "UPDATE games SET game_status = 'playing', started_at = % WHERE id = %",
                 (datetime.now().isoformat(), game['id'])
             )
             
             conn.commit()
         
-        conn.close()
+        db.return_connection(conn)
         
         # Now call the game manager's start_game
         result = game_manager.start_game(
@@ -1005,7 +1005,7 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
         
         # Get game and state
         cursor.execute(
-            "SELECT game_status FROM games WHERE id = ?",
+            "SELECT game_status FROM games WHERE id = %",
             (game_id,)
         )
         game = cursor.fetchone()
@@ -1017,7 +1017,7 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
             raise HTTPException(status_code=400, detail="Game is not in progress")
         
         cursor.execute(
-            "SELECT state_json FROM game_states WHERE game_id = ?",
+            "SELECT state_json FROM game_states WHERE game_id = %",
             (game_id,)
         )
         state_record = cursor.fetchone()
@@ -1248,14 +1248,14 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
         
         # Save updated state
         cursor.execute(
-            "UPDATE game_states SET state_json = ?, last_updated = CURRENT_TIMESTAMP WHERE game_id = ?",
+            "UPDATE game_states SET state_json = %, last_updated = CURRENT_TIMESTAMP WHERE game_id = %",
             (json.dumps(game_state), game_id)
         )
         
         # Update game if over
         if game_state['game_status'] == 'game_over':
             cursor.execute(
-                "UPDATE games SET game_status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                "UPDATE games SET game_status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = %",
                 (game_id,)
             )
         
@@ -1279,7 +1279,7 @@ async def make_enhanced_move(game_id: str, move_request: MoveRequest):
         )
     finally:
         if conn:
-            conn.close()
+            db.return_connection(conn)
 
 @app.get("/api/game/room/{room_code}/id")
 async def get_game_id(room_code: str):
@@ -1289,7 +1289,7 @@ async def get_game_id(room_code: str):
     
     try:
         cursor.execute(
-            "SELECT id FROM games WHERE room_code = ?",
+            "SELECT id FROM games WHERE room_code = %",
             (room_code.upper(),)
         )
         game = cursor.fetchone()
@@ -1313,7 +1313,7 @@ async def get_game_id(room_code: str):
             detail=f"Failed to get game ID: {str(e)}"
         )
     finally:
-        conn.close()
+        db.return_connection(conn)
         
 @app.post("/api/game/{game_id}/ai-move")
 async def trigger_ai_move(game_id: str):
@@ -1324,7 +1324,7 @@ async def trigger_ai_move(game_id: str):
     try:
         # Get game state
         cursor.execute(
-            "SELECT state_json FROM game_states WHERE game_id = ?",
+            "SELECT state_json FROM game_states WHERE game_id = %",
             (game_id,)
         )
         state_record = cursor.fetchone()
@@ -1425,14 +1425,14 @@ async def trigger_ai_move(game_id: str):
         
         # Save updated state
         cursor.execute(
-            "UPDATE game_states SET state_json = ?, last_updated = CURRENT_TIMESTAMP WHERE game_id = ?",
+            "UPDATE game_states SET state_json = %, last_updated = CURRENT_TIMESTAMP WHERE game_id = %",
             (json.dumps(game_state), game_id)
         )
         
         # Update game if over
         if game_state['game_status'] == 'game_over':
             cursor.execute(
-                "UPDATE games SET game_status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                "UPDATE games SET game_status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = %",
                 (game_id,)
             )
         
@@ -1453,7 +1453,7 @@ async def trigger_ai_move(game_id: str):
             detail=f"Failed to make AI move: {str(e)}"
         )
     finally:
-        conn.close()
+        db.return_connection(conn)
 
 # ============ ADMIN ENDPOINTS ============
 
@@ -1530,9 +1530,35 @@ async def get_database_stats(admin_token: str = Form(...)):
     cursor.execute("SELECT COUNT(*) FROM games WHERE game_status = 'lobby'")
     stats['lobby_games'] = cursor.fetchone()[0]
     
-    conn.close()
+    db.return_connection(conn)
     
     return stats
+    
+@app.get("/api/test/users")
+async def test_get_users():
+    """Public test endpoint to view users (limited info) for verifying persistence"""
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id, username, email, created_at FROM users LIMIT 10")
+        users = [dict(row) for row in cursor.fetchall()]
+        return {"success": True, "users": users}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    finally:
+        db.return_connection(conn)
+
+@app.get("/api/test/games")
+async def test_get_games():
+    """Public test endpoint to view games (limited info)"""
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id, room_code, game_name, game_status, created_at FROM games LIMIT 10")
+        games = [dict(row) for row in cursor.fetchall()]
+        return {"success": True, "games": games}
+    finally:
+        db.return_connection(conn)
 
 # Run the app
 if __name__ == "__main__":
