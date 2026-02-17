@@ -1,4 +1,4 @@
-# game_manager.py - PostgreSQL compatible with boolean fixes
+# game_manager.py - PostgreSQL compatible with guest user creation
 import uuid
 import json
 import random
@@ -12,6 +12,23 @@ class GameManager:
 
     def _ensure_db(self):
         db.ensure_tables_exist()
+
+    def _ensure_user_exists(self, cursor, user_id: str, username: str):
+        """Insert a placeholder user if the user_id does not exist in users table."""
+        if user_id is None:
+            return
+        cursor.execute("""
+            INSERT INTO users (id, username, email, password_hash, created_at, last_login)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+        """, (
+            user_id,
+            username,
+            None,                             # email
+            "guest",                           # dummy password hash
+            datetime.now().isoformat(),
+            datetime.now().isoformat()
+        ))
 
     def create_deck(self) -> List[Dict]:
         suits = ["hearts", "diamonds", "clubs", "spades"]
@@ -72,7 +89,11 @@ class GameManager:
                     elif player_data.get("user_id") and not player_data.get("is_computer", False):
                         user_id = player_data["user_id"]
 
-                    # Insert with proper booleans
+                    # Ensure user exists (for guests)
+                    if user_id:
+                        self._ensure_user_exists(cursor, user_id, player_data["name"])
+
+                    # Insert player with proper booleans
                     cursor.execute("""
                         INSERT INTO game_players (id, game_id, user_id, player_name, position, is_computer, is_host, is_ready)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -199,10 +220,12 @@ class GameManager:
                 if player_count >= 4:
                     raise ValueError("Game is full")
 
+                # Ensure user exists (for guests)
+                self._ensure_user_exists(cursor, user_id, player_name)
+
                 player_id = str(uuid.uuid4())
                 position = player_count
 
-                # Insert with proper booleans
                 cursor.execute("""
                     INSERT INTO game_players (id, game_id, user_id, player_name, position, is_computer, is_host, is_ready)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
