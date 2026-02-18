@@ -12,6 +12,7 @@ import csv
 import io
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi import UploadFile, File, Form
+from fastapi.responses import HTMLResponse
 import re
 
 # Import managers
@@ -1200,6 +1201,204 @@ async def get_database_stats(admin_token: str = Form(...)):
         return stats
     finally:
         db.return_connection(conn)
+        
+
+@app.get("/delete-account", response_class=HTMLResponse)
+async def delete_account_page():
+    """Serve a web page for account deletion."""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Delete Account - Tonk Game</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                background-color: #1a472a;
+                color: white;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+                padding: 20px;
+            }
+            .container {
+                background-color: rgba(0, 0, 0, 0.8);
+                padding: 30px;
+                border-radius: 10px;
+                width: 100%;
+                max-width: 400px;
+                border: 2px solid #ffd700;
+                box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            }
+            h2 {
+                text-align: center;
+                color: #ffd700;
+                margin-top: 0;
+                margin-bottom: 10px;
+            }
+            .warning {
+                text-align: center;
+                color: #ff9999;
+                font-weight: bold;
+                margin-bottom: 20px;
+            }
+            label {
+                display: block;
+                margin-top: 15px;
+                font-weight: bold;
+                color: #ddd;
+            }
+            input[type="text"], input[type="password"] {
+                width: 100%;
+                padding: 10px;
+                margin-top: 5px;
+                border-radius: 5px;
+                border: none;
+                box-sizing: border-box;
+                background-color: #333;
+                color: white;
+                font-size: 16px;
+            }
+            button {
+                background-color: #d32f2f;
+                color: white;
+                border: none;
+                padding: 12px;
+                width: 100%;
+                border-radius: 5px;
+                font-size: 18px;
+                font-weight: bold;
+                margin-top: 25px;
+                cursor: pointer;
+                transition: background-color 0.2s;
+            }
+            button:hover {
+                background-color: #b71c1c;
+            }
+            button:disabled {
+                background-color: #666;
+                cursor: not-allowed;
+            }
+            .message {
+                margin-top: 20px;
+                padding: 12px;
+                border-radius: 5px;
+                text-align: center;
+                font-weight: bold;
+                display: none;
+            }
+            .success {
+                background-color: rgba(0, 255, 0, 0.2);
+                border: 1px solid #00ff00;
+                color: #aaffaa;
+            }
+            .error {
+                background-color: rgba(255, 0, 0, 0.2);
+                border: 1px solid #ff0000;
+                color: #ff9999;
+            }
+            .loader {
+                display: inline-block;
+                width: 20px;
+                height: 20px;
+                border: 3px solid #f3f3f3;
+                border-top: 3px solid #ffd700;
+                border-radius: 50%;
+                animation: spin 1s linear infinite;
+                margin-left: 10px;
+                vertical-align: middle;
+            }
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+        </style>
+        <script>
+            async function handleSubmit(event) {
+                event.preventDefault();
+
+                // Get form data
+                const username = document.getElementById('username').value.trim();
+                const password = document.getElementById('password').value;
+
+                if (!username || !password) {
+                    showMessage('Please fill in both fields', 'error');
+                    return;
+                }
+
+                // Confirm with user
+                if (!confirm('⚠️ Are you absolutely sure? This will permanently delete your account and all associated data. This action cannot be undone.')) {
+                    return;
+                }
+
+                // Disable button and show loading
+                const submitBtn = document.getElementById('submitBtn');
+                const originalText = submitBtn.innerText;
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = 'Deleting... <span class="loader"></span>';
+
+                // Hide any previous message
+                const messageDiv = document.getElementById('message');
+                messageDiv.style.display = 'none';
+                messageDiv.className = 'message';
+
+                try {
+                    const response = await fetch('/delete_account', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username, password })
+                    });
+
+                    const result = await response.json();
+
+                    if (response.ok && result.success) {
+                        showMessage('✅ Account permanently deleted. You may close this window.', 'success');
+                        // Optionally clear the form
+                        document.getElementById('username').value = '';
+                        document.getElementById('password').value = '';
+                    } else {
+                        const errorMsg = result.detail || 'Invalid username or password';
+                        showMessage('❌ ' + errorMsg, 'error');
+                    }
+                } catch (error) {
+                    showMessage('❌ Network error. Please try again.', 'error');
+                } finally {
+                    // Re-enable button
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = originalText;
+                }
+            }
+
+            function showMessage(text, type) {
+                const messageDiv = document.getElementById('message');
+                messageDiv.innerText = text;
+                messageDiv.className = 'message ' + type;
+                messageDiv.style.display = 'block';
+            }
+        </script>
+    </head>
+    <body>
+        <div class="container">
+            <h2>Delete Your Tonk Account</h2>
+            <div class="warning">⚠️ Warning: This is permanent and irreversible.</div>
+            <form id="deleteForm" onsubmit="handleSubmit(event)">
+                <label for="username">Username:</label>
+                <input type="text" id="username" name="username" required autocomplete="username">
+
+                <label for="password">Password:</label>
+                <input type="password" id="password" name="password" required autocomplete="current-password">
+
+                <button type="submit" id="submitBtn">Permanently Delete My Account</button>
+            </form>
+            <div id="message" class="message"></div>
+        </div>
+    </body>
+    </html>
+    """
 
 # Run the app
 if __name__ == "__main__":
